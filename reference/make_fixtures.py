@@ -101,6 +101,9 @@ def main():
   save("video", video)
   save("magnified", magnified)
   save("disp_x", dx)
+  pooled, pooled_wt = sp.pooled_displacement(video, [1, 2, 3], 2, ORIENTS)
+  save("pooled_disp", pooled)
+  save("pooled_weight", pooled_wt)
   (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2))
   print(f"wrote {len(manifest['arrays'])} arrays to {OUT}")
 

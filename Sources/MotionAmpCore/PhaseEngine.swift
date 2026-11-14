@@ -254,69 +254,97 @@ public final class Magnifier {
   }
 }
 
-/// Measures per-pixel displacement from the first frame at one pyramid level.
+/// Measures displacement from the first frame on a coarse grid.
 ///
-/// Mirrors `displacement` in the `reference/steerable.py` file.
+/// Mirrors `pooled_displacement` in the `reference/steerable.py` file. Each
+/// level's displacement is averaged over square blocks with the squared
+/// coefficient amplitude as the weight. The levels are then combined with
+/// the same weights.
 public final class MotionAnalyzer {
   public let width: Int
   public let height: Int
-  public let level: Int
-  /// The height of the displacement maps.
-  public let mapHeight: Int
-  /// The width of the displacement maps.
-  public let mapWidth: Int
-  /// The level's peak spatial frequency in cycles per pixel.
-  public var peakFrequency: Double { 0.5 * pow(2, -Double(level)) }
+  /// The height of the output grid.
+  public let gridHeight: Int
+  /// The width of the output grid.
+  public let gridWidth: Int
 
   private let ctx: GraphContext
   private let yIn: MPSGraphTensor
-  private let refRe: MPSGraphTensor
-  private let refIm: MPSGraphTensor
-  private let cRe: MPSGraphTensor
-  private let cIm: MPSGraphTensor
+  private var refIn: [MPSGraphTensor] = []  // re then im, per level
+  private var coefOut: [MPSGraphTensor] = []  // re then im, per level
   private let disp: MPSGraphTensor
   private let weight: MPSGraphTensor
-  private var refData: (MPSGraphTensorData, MPSGraphTensorData)?
+  private var refData: [MPSGraphTensorData]?
 
   /// Creates an analyzer.
   ///
   /// - Parameters:
   ///   - width: The frame width. Must be even.
   ///   - height: The frame height. Must be even.
-  ///   - level: The 1-based pyramid level to measure.
+  ///   - levels: The 1-based pyramid levels to combine.
+  ///   - pool: The block size, in samples of the coarsest level, that one grid cell covers.
   ///   - orients: The number of orientations in the pyramid. Must be even.
-  public init(width: Int, height: Int, level: Int, orients: Int = 4) throws {
+  public init(width: Int, height: Int, levels: [Int], pool: Int = 1, orients: Int = 4) throws {
     self.width = width
     self.height = height
-    self.level = level
-    let filters = PyramidFilters(height: height, width: width, scales: level, orients: orients)
-    let hk = filters.levelHeights[level - 1]
-    let wk = filters.levelWidths[level - 1]
-    mapHeight = hk
-    mapWidth = wk
-    // Keep orientation 0 (x) and orientation orients / 2 (y).
-    let all = filters.bands[level - 1]
-    let n = hk * wk
-    let two = Array(all[0..<n]) + Array(all[(orients / 2) * n..<(orients / 2 + 1) * n])
+    let top = levels.max()!
+    let filters = PyramidFilters(height: height, width: width, scales: top, orients: orients)
+    let blocks = levels.map { pool << (top - $0) }
+    let gh = zip(levels, blocks).map { filters.levelHeights[$0 - 1] / $1 }.min()!
+    let gw = zip(levels, blocks).map { filters.levelWidths[$0 - 1] / $1 }.min()!
+    gridHeight = gh
+    gridWidth = gw
 
     ctx = try GraphContext()
     let c = ctx
-    let shape = [2, hk, wk]
     yIn = c.placeholder([height, width])
     let zero = c.g.constant(0, shape: GraphContext.ns([height, width]), dataType: .float32)
     let (xRe, xIm) = c.fft(yIn, zero, axes: [0, 1], inverse: false)
-    let f = c.const(two, shape)
-    let cropRe = c.crop(c.crop(xRe, dim: 0, n: height, nc: hk), dim: 1, n: width, nc: wk)
-    let cropIm = c.crop(c.crop(xIm, dim: 0, n: height, nc: hk), dim: 1, n: width, nc: wk)
-    (cRe, cIm) = c.fft(c.mul(cropRe, f), c.mul(cropIm, f), axes: [1, 2], inverse: true)
-    refRe = c.placeholder(shape)
-    refIm = c.placeholder(shape)
-    let pRe = c.add(c.mul(cRe, refRe), c.mul(cIm, refIm))
-    let pIm = c.sub(c.mul(cIm, refRe), c.mul(cRe, refIm))
-    let delta = c.g.atan2(withPrimaryTensor: pIm, secondaryTensor: pRe, name: nil)
-    let peak = 0.5 * pow(2, -Double(level))
-    disp = c.mul(delta, c.scalar(-1 / (2 * Double.pi * peak)))
-    weight = c.add(c.mul(cRe, cRe), c.mul(cIm, cIm))
+    var num: MPSGraphTensor?
+    var den: MPSGraphTensor?
+    for (k, block) in zip(levels, blocks) {
+      let hk = filters.levelHeights[k - 1]
+      let wk = filters.levelWidths[k - 1]
+      let n = hk * wk
+      // Keep orientation 0 (x) and orientation orients / 2 (y).
+      let all = filters.bands[k - 1]
+      let two = Array(all[0..<n]) + Array(all[(orients / 2) * n..<(orients / 2 + 1) * n])
+      let shape = [2, hk, wk]
+      let f = c.const(two, shape)
+      let cropRe = c.crop(c.crop(xRe, dim: 0, n: height, nc: hk), dim: 1, n: width, nc: wk)
+      let cropIm = c.crop(c.crop(xIm, dim: 0, n: height, nc: hk), dim: 1, n: width, nc: wk)
+      let (cRe, cIm) = c.fft(c.mul(cropRe, f), c.mul(cropIm, f), axes: [1, 2], inverse: true)
+      coefOut += [cRe, cIm]
+      let rRe = c.placeholder(shape)
+      let rIm = c.placeholder(shape)
+      refIn += [rRe, rIm]
+      let pRe = c.add(c.mul(cRe, rRe), c.mul(cIm, rIm))
+      let pIm = c.sub(c.mul(cIm, rRe), c.mul(cRe, rIm))
+      let delta = c.g.atan2(withPrimaryTensor: pIm, secondaryTensor: pRe, name: nil)
+      // The level's peak spatial frequency is 0.5 * 2^-k cycles per pixel.
+      let d = c.mul(delta, c.scalar(-1 / (2 * Double.pi * 0.5 * pow(2, -Double(k)))))
+      // Undo the amplitude gain that the cropped inverse FFT adds.
+      let gain = pow(Double(n) / Double(height * width), 2)
+      let w = c.mul(c.add(c.mul(cRe, cRe), c.mul(cIm, cIm)), c.scalar(gain))
+
+      func pooled(_ t: MPSGraphTensor) -> MPSGraphTensor {
+        var o = c.g.reshape(t, shape: GraphContext.ns([1, 2, hk, wk]), name: nil)
+        if block > 1 {
+          let pd = MPSGraphPooling2DOpDescriptor(
+            kernelWidth: block, kernelHeight: block, strideInX: block, strideInY: block,
+            paddingStyle: .TF_VALID, dataLayout: .NCHW)!
+          o = c.g.avgPooling2D(withSourceTensor: o, descriptor: pd, name: nil)
+        }
+        o = c.g.sliceTensor(o, dimension: 2, start: 0, length: gh, name: nil)
+        return c.g.sliceTensor(o, dimension: 3, start: 0, length: gw, name: nil)
+      }
+      let pn = pooled(c.mul(d, w))
+      let pw = pooled(w)
+      num = num.map { c.add($0, pn) } ?? pn
+      den = den.map { c.add($0, pw) } ?? pw
+    }
+    disp = c.g.division(num!, c.add(den!, c.scalar(1e-30)), name: nil)
+    weight = den!
   }
 
   /// Measures the next frame.
@@ -325,19 +353,21 @@ public final class MotionAnalyzer {
   ///
   /// - Parameters:
   ///   - y: The luma frame in row-major order, `width * height` values.
-  ///   - displacement: The x map then the y map, in pixels of the input frame.
-  ///     Must hold `2 * mapHeight * mapWidth` values.
-  ///   - weight: The squared coefficient amplitude, in the same layout.
+  ///   - displacement: The x grid then the y grid, in pixels of the input frame.
+  ///     Must hold `2 * gridHeight * gridWidth` values.
+  ///   - weight: The pooled squared coefficient amplitude, in the same layout.
   public func process(
     _ y: UnsafeBufferPointer<Float>, displacement: inout [Float], weight w: inout [Float]
   ) {
     autoreleasepool {
       let yd = ctx.data(y, [height, width])
       if refData == nil {
-        let r = ctx.run([yIn: yd], [cRe, cIm])
-        refData = (r[cRe]!, r[cIm]!)
+        let r = ctx.run([yIn: yd], coefOut)
+        refData = coefOut.map { r[$0]! }
       }
-      let r = ctx.run([yIn: yd, refRe: refData!.0, refIm: refData!.1], [disp, weight])
+      var feeds: [MPSGraphTensor: MPSGraphTensorData] = [yIn: yd]
+      for (t, d) in zip(refIn, refData!) { feeds[t] = d }
+      let r = ctx.run(feeds, [disp, weight])
       ctx.read(r[disp]!, into: &displacement)
       ctx.read(r[weight]!, into: &w)
     }

@@ -12,10 +12,18 @@ struct MotionAmpApp: App {
         .environmentObject(model)
         .frame(minWidth: 960, minHeight: 680)
         .onAppear {
-          // A path argument opens that file at launch.
-          if let path = CommandLine.arguments.dropFirst().first(where: { !$0.hasPrefix("-") }) {
-            model.open(URL(fileURLWithPath: path))
+          // Launch arguments: [--fps RATE] [--lo HZ] [--hi HZ] [VIDEO].
+          var args = Array(CommandLine.arguments.dropFirst())
+          var path: String?
+          while !args.isEmpty {
+            let a = args.removeFirst()
+            if ["--fps", "--lo", "--hi"].contains(a), !args.isEmpty {
+              model.launchOptions[a] = Double(args.removeFirst())
+            } else if !a.hasPrefix("-") {
+              path = a
+            }
           }
+          if let path { model.open(URL(fileURLWithPath: path)) }
         }
     }
     .commands {

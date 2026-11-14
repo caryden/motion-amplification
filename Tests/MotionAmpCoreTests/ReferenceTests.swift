@@ -81,13 +81,26 @@ final class ReferenceTests: XCTestCase {
   }
 
   func testDisplacementMatchesReference() throws {
+    try checkDisplacement(levels: [2], pool: 1, expected: "disp_x", components: 1)
+  }
+
+  func testPooledDisplacementMatchesReference() throws {
+    try checkDisplacement(levels: [1, 2, 3], pool: 2, expected: "pooled_disp", components: 2)
+  }
+
+  /// - Parameter components: The number of displacement components that the fixture holds.
+  func checkDisplacement(levels: [Int], pool: Int, expected name: String, components: Int)
+    throws
+  {
     let m = try manifest()
     let video = try load("video")
-    let expected = try load("disp_x")
-    let an = try MotionAnalyzer(width: m.w, height: m.h, level: 2, orients: m.orients)
+    let expected = try load(name)
+    let an = try MotionAnalyzer(
+      width: m.w, height: m.h, levels: levels, pool: pool, orients: m.orients)
     let n = m.h * m.w
-    let mapN = an.mapWidth * an.mapHeight
-    var d = [Float](repeating: 0, count: 2 * mapN)
+    let cells = an.gridWidth * an.gridHeight
+    XCTAssertEqual(expected.count, m.frames * components * cells)
+    var d = [Float](repeating: 0, count: 2 * cells)
     var w = d
     var worst: Float = 0
     for i in 0..<m.frames {
@@ -96,9 +109,10 @@ final class ReferenceTests: XCTestCase {
           UnsafeBufferPointer(rebasing: $0[i * n..<(i + 1) * n]), displacement: &d, weight: &w)
       }
       // Compare where the coefficient amplitude is large enough for a stable phase.
-      let floor = w[0..<mapN].max()! * 1e-3
-      for j in 0..<mapN where w[j] > floor {
-        worst = max(worst, abs(d[j] - expected[i * mapN + j]))
+      let count = components * cells
+      let floor = w[0..<count].max()! * 1e-3
+      for j in 0..<count where w[j] > floor {
+        worst = max(worst, abs(d[j] - expected[i * count + j]))
       }
     }
     XCTAssertLessThan(worst, 2e-3)

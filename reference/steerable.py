@@ -168,3 +168,52 @@ def displacement(frames, level, scales, orients):
     d[i] = -np.angle(c * np.conj(ref)) / (2 * pi * peak)
     wt[i] = np.abs(c)**2
   return d[:, 0], d[:, 1], wt
+
+
+def pooled_displacement(frames, levels, pool, orients):
+  """Estimates displacement on a coarse grid from several pyramid levels.
+
+  Each level's displacement is averaged over square blocks with the squared
+  coefficient amplitude as the weight, and the levels are then combined with
+  the same weights. The coarsest level uses blocks of pool samples per side.
+  Finer levels use proportionally larger blocks, so all levels share a grid.
+
+  Returns:
+    A tuple (d, weight) of arrays with shape [t, 2, gh, gw]. Index 0 of the
+    second axis is x and index 1 is y. d is in pixels.
+  """
+  t, h, w = frames.shape
+  top = max(levels)
+  bands, _ = build_filters(h, w, top, orients)
+  parts = []
+  for k in levels:
+    f = bands[k - 1][[0, orients // 2]]
+    block = pool * 2**(top - k)
+    parts.append((k, f, block, f.shape[1] // block, f.shape[2] // block))
+  gh = min(p[3] for p in parts)
+  gw = min(p[4] for p in parts)
+  refs = {}
+  d = np.empty((t, 2, gh, gw))
+  wt = np.empty_like(d)
+  for i in range(t):
+    spectrum = np.fft.fft2(frames[i])
+    num = np.zeros((2, gh, gw))
+    den = np.zeros((2, gh, gw))
+    for k, f, block, bh, bw in parts:
+      hk, wk = f.shape[1:]
+      c = np.fft.ifft2(
+          spectrum[np.ix_(crop_index(h, hk), crop_index(w, wk))][None] * f)
+      ref = refs.setdefault(k, c)
+      disp = -np.angle(c * np.conj(ref)) / (2 * pi * 0.5 * 2.0**-k)
+      # Undo the amplitude gain that the cropped inverse FFT adds.
+      wgt = np.abs(c)**2 * (hk * wk / (h * w))**2
+
+      def blocks(a):
+        a = a[:, :bh * block, :bw * block]
+        return a.reshape(2, bh, block, bw, block).mean(axis=(2, 4))[:, :gh, :gw]
+
+      num += blocks(disp * wgt)
+      den += blocks(wgt)
+    d[i] = num / (den + 1e-30)
+    wt[i] = den
+  return d, wt

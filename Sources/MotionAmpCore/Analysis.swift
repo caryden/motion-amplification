@@ -52,12 +52,25 @@ public struct MotionAnalysis: Sendable {
   public let amplitude: [Float]
   /// Per-cell confidence from 0 to 1. Cells with little texture score 0.
   public let confidence: [Float]
-  /// The confidence-weighted root mean square amplitude over all cells, per bin.
+  /// The 99th-percentile amplitude over the confident cells, per bin.
+  ///
+  /// A high percentile keeps a vibration visible when it covers a small part of the frame.
   public let globalSpectrum: [Float]
   /// The median amplitude over all bins of the confident cells, in source pixels.
   public let noiseFloor: Float
 
   public var nyquist: Double { fps / 2 }
+
+  /// Gets a copy that reinterprets the frames at a different capture rate.
+  ///
+  /// Use this method for high-speed footage that is stored at a slower
+  /// playback rate, where the file's timestamps don't give the capture rate.
+  public func rescaled(fps newFps: Double) -> MotionAnalysis {
+    MotionAnalysis(
+      gridWidth: gridWidth, gridHeight: gridHeight, frames: frames, fps: newFps,
+      binHz: binHz * newFps / fps, bins: bins, amplitude: amplitude, confidence: confidence,
+      globalSpectrum: globalSpectrum, noiseFloor: noiseFloor)
+  }
 
   func binRange(lo: Double, hi: Double) -> ClosedRange<Int> {
     let a = max(1, min(bins - 1, Int((lo / binHz).rounded(.up))))
@@ -65,17 +78,37 @@ public struct MotionAnalysis: Sendable {
     return a...b
   }
 
-  /// Gets the peak amplitude of each cell in a band, scaled by the cell's confidence.
+  /// Gets how far each cell's in-band peak rises over that cell's own noise.
+  ///
+  /// For each cell, takes the largest amplitude in the band and subtracts
+  /// three times the median amplitude of the bins that flank the band. A cell
+  /// with broadband noise and no peak in the band therefore scores 0. The
+  /// result is scaled by the cell's confidence.
   ///
   /// - Returns: `gridWidth * gridHeight` values in source pixels, row-major.
   public func heat(lo: Double, hi: Double) -> [Float] {
     let r = binRange(lo: lo, hi: hi)
+    let flank = max(8, r.count)
+    let below = max(1, r.lowerBound - flank)..<r.lowerBound
+    let above = min(bins, r.upperBound + 1)..<min(bins, r.upperBound + 1 + flank)
     var out = [Float](repeating: 0, count: gridWidth * gridHeight)
     amplitude.withUnsafeBufferPointer { a in
-      for c in 0..<out.count where confidence[c] > 0 {
-        var m: Float = 0
-        vDSP_maxv(a.baseAddress! + c * bins + r.lowerBound, 1, &m, vDSP_Length(r.count))
-        out[c] = m * confidence[c]
+      out.withUnsafeMutableBufferPointer { o in
+        let (ap, op) = (a.baseAddress!, o.baseAddress!)
+        DispatchQueue.concurrentPerform(iterations: gridHeight) { gy in
+          var side = [Float]()
+          side.reserveCapacity(2 * flank)
+          for c in gy * gridWidth..<(gy + 1) * gridWidth where confidence[c] > 0 {
+            var peak: Float = 0
+            vDSP_maxv(ap + c * bins + r.lowerBound, 1, &peak, vDSP_Length(r.count))
+            side.removeAll(keepingCapacity: true)
+            for i in below { side.append(ap[c * bins + i]) }
+            for i in above { side.append(ap[c * bins + i]) }
+            side.sort()
+            let base = side.isEmpty ? 0 : side[side.count / 2]
+            op[c] = max(0, peak - 3 * base) * confidence[c]
+          }
+        }
       }
     }
     return out
@@ -111,27 +144,27 @@ public struct MotionAnalysis: Sendable {
 /// - Parameters:
 ///   - url: The movie file.
 ///   - maxDimension: The longer side of the frames that the analysis decodes.
-///   - level: The 1-based pyramid level to measure.
+///   - levels: The 1-based pyramid levels to combine.
 ///   - targetGridWidth: The approximate number of grid cells along the frame width.
 ///   - confidenceFloor: The fraction of the 90th-percentile texture energy
 ///     under which a cell's confidence is 0.
 ///   - progress: Called with a fraction from 0 to 1.
 public func analyzeMotion(
-  url: URL, maxDimension: Int = 960, level: Int = 2, targetGridWidth: Int = 160,
+  url: URL, maxDimension: Int = 1280, levels: [Int] = [1, 2, 3], targetGridWidth: Int = 160,
   confidenceFloor: Float = 0.01, progress: @Sendable (Double) -> Void = { _ in }
 ) async throws -> MotionAnalysis {
   let info = try await VideoInfo.load(url)
   let reader = try await FrameReader(url: url, maxDimension: maxDimension)
   let (w, h) = (reader.width, reader.height)
-  let analyzer = try MotionAnalyzer(width: w, height: h, level: level)
-  let (mw, mh) = (analyzer.mapWidth, analyzer.mapHeight)
-  let pool = max(1, mw / targetGridWidth)
-  let (gw, gh) = (mw / pool, mh / pool)
+  let coarse = PyramidFilters.levelSize(w, levels.max()!)
+  let pool = max(1, Int((Double(coarse) / Double(targetGridWidth)).rounded()))
+  let analyzer = try MotionAnalyzer(width: w, height: h, levels: levels, pool: pool)
+  let (gw, gh) = (analyzer.gridWidth, analyzer.gridHeight)
   let cells = gw * gh
   let toSource = Float(info.width) / Float(w)
 
   var y = [Float](repeating: 0, count: w * h)
-  var disp = [Float](repeating: 0, count: 2 * mw * mh)
+  var disp = [Float](repeating: 0, count: 2 * cells)
   var wt = disp
   var series: [[Float]] = []  // Per frame: x cells then y cells.
   var energy = [Float](repeating: 0, count: cells)
@@ -149,26 +182,10 @@ public func analyzeMotion(
     readLuma(CMSampleBufferGetImageBuffer(sb)!, into: &y)
     y.withUnsafeBufferPointer { analyzer.process($0, displacement: &disp, weight: &wt) }
 
-    // Pool with the squared amplitude as the weight, because the phase of a
-    // weak coefficient is mostly noise.
     var frame = [Float](repeating: 0, count: 2 * cells)
-    for comp in 0..<2 {
-      let base = comp * mw * mh
-      for gy in 0..<gh {
-        for gx in 0..<gw {
-          var num: Float = 0
-          var den: Float = 0
-          for py in 0..<pool {
-            let row = base + (gy * pool + py) * mw + gx * pool
-            for px in 0..<pool {
-              num += disp[row + px] * wt[row + px]
-              den += wt[row + px]
-            }
-          }
-          frame[comp * cells + gy * gw + gx] = den > 0 ? toSource * num / den : 0
-          energy[gy * gw + gx] += den
-        }
-      }
+    for i in 0..<2 * cells {
+      frame[i] = toSource * disp[i]
+      energy[i % cells] += wt[i]
     }
     series.append(frame)
     if series.count % 16 == 0 { progress(min(0.9, 0.9 * Double(series.count) / Double(info.estimatedFrames))) }
@@ -218,14 +235,20 @@ public func analyzeMotion(
   }
 
   var global = [Float](repeating: 0, count: bins)
-  let confSum = max(1e-9, confidence.reduce(0, +))
-  for c in 0..<cells where confidence[c] > 0 {
-    for i in 0..<bins {
-      let a = amplitude[c * bins + i]
-      global[i] += confidence[c] * a * a
+  let confident = (0..<cells).filter { confidence[$0] > 0.5 }
+  if !confident.isEmpty {
+    global.withUnsafeMutableBufferPointer { g in
+      let gp = g.baseAddress!
+      amplitude.withUnsafeBufferPointer { amp in
+        let ap = amp.baseAddress!
+        DispatchQueue.concurrentPerform(iterations: bins) { i in
+          var column = confident.map { ap[$0 * bins + i] }
+          column.sort()
+          gp[i] = column[min(column.count - 1, column.count * 99 / 100)]
+        }
+      }
     }
   }
-  global = global.map { ($0 / confSum).squareRoot() }
   // Sample up to about 200,000 amplitudes from confident cells for the median.
   var sample: [Float] = []
   let step = max(1, cells * bins / 200_000)

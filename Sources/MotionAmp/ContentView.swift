@@ -30,6 +30,16 @@ struct ContentView: View {
         Text(info.url.lastPathComponent).fontWeight(.medium)
         Text("\(Int(info.displaySize.width))×\(Int(info.displaySize.height))")
           .foregroundStyle(.secondary)
+        if model.analysis != nil {
+          Text("Capture fps").padding(.leading, 8)
+          TextField(
+            "",
+            value: Binding(get: { model.captureFps }, set: { model.setCaptureFps($0) }),
+            format: .number.precision(.fractionLength(0...2))
+          )
+          .textFieldStyle(.roundedBorder).frame(width: 70).multilineTextAlignment(.trailing)
+          .help("Set the true capture rate for high-speed footage that is stored at a slower rate.")
+        }
       }
       Spacer()
       Text(model.status).foregroundStyle(.secondary).lineLimit(1)

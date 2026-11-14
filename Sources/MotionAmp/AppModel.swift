@@ -27,6 +27,9 @@ final class AppModel: ObservableObject {
   @Published var renderMaxDimension = 0
   @Published var cellSpectrum: [Float]?
   @Published var cellLabel = ""
+  @Published var captureFps = 0.0
+  /// Values of the `--fps`, `--lo`, and `--hi` launch arguments.
+  var launchOptions: [String: Double] = [:]
 
   let player = AVPlayer()
   private var audio: AudioData?
@@ -95,6 +98,7 @@ final class AppModel: ObservableObject {
           audioSpectrum = await Task.detached { a.spectrum() }.value
         }
         analysis = result
+        captureFps = result.fps
         progress = nil
         if let top = result.peaks(count: 1).first {
           selectPeak(top.hz)
@@ -104,6 +108,11 @@ final class AppModel: ObservableObject {
         status = String(
           format: "%d frames at %.1f fps. Vibrations up to %.0f Hz are measurable.",
           result.frames, result.fps, result.nyquist)
+        if let fps = launchOptions["--fps"] { setCaptureFps(fps) }
+        if let lo = launchOptions["--lo"], let hi = launchOptions["--hi"] {
+          setBand(lo: lo, hi: hi, final: true)
+        }
+        launchOptions = [:]
         await debugSnapshot()
       } catch is CancellationError {
       } catch {
@@ -115,16 +124,15 @@ final class AppModel: ObservableObject {
 
   /// Writes a PNG file of the window for scripted checks.
   ///
-  /// Runs only if the `MOTIONAMP_SNAPSHOT` environment variable holds a file
-  /// path. If `MOTIONAMP_AUTORENDER` is also set, renders the amplified video
-  /// first. The video layer itself isn't captured.
+  /// If the `MOTIONAMP_AUTORENDER` environment variable is set, renders the
+  /// amplified video first. If `MOTIONAMP_SNAPSHOT` holds a file path, writes
+  /// the snapshot there and quits. The snapshot omits the video layer.
   private func debugSnapshot() async {
-    guard let path = ProcessInfo.processInfo.environment["MOTIONAMP_SNAPSHOT"] else { return }
     if ProcessInfo.processInfo.environment["MOTIONAMP_AUTORENDER"] != nil {
-      selectCell(u: 0.22, v: 0.5)
       render()
       await job?.value
     }
+    guard let path = ProcessInfo.processInfo.environment["MOTIONAMP_SNAPSHOT"] else { return }
     try? await Task.sleep(nanoseconds: 1_500_000_000)
     if let item = player.currentItem {
       let tracks = (try? await item.asset.load(.tracks)) ?? []
@@ -140,6 +148,24 @@ final class AppModel: ObservableObject {
     }
     print("status: \(status)")
     NSApp.terminate(nil)
+  }
+
+  /// Reinterprets the clip at a different capture rate.
+  ///
+  /// High-speed footage is often stored at 30 frames per second. The
+  /// frequencies in the plot and the band then scale with the true rate.
+  func setCaptureFps(_ fps: Double) {
+    guard let a = analysis, fps >= 1, fps != a.fps else {
+      captureFps = analysis?.fps ?? 0
+      return
+    }
+    let ratio = fps / a.fps
+    analysis = a.rescaled(fps: fps)
+    captureFps = fps
+    cellSpectrum = nil
+    cellLabel = ""
+    setBand(lo: lo * ratio, hi: hi * ratio, final: true)
+    status = String(format: "Capture rate set to %.1f fps. Vibrations up to %.0f Hz are measurable.", fps, fps / 2)
   }
 
   // MARK: Band
@@ -164,11 +190,11 @@ final class AppModel: ObservableObject {
   func updateHeat() {
     guard let a = analysis, let info else { return }
     let values = a.heat(lo: lo, hi: hi)
-    // Scale to the 99.8th percentile, but never under six times the noise
+    // Scale to the 99.8th percentile, but never under three times the noise
     // floor. A band that holds only noise then stays mostly transparent.
     let sorted = values.sorted()
     let p = sorted[min(sorted.count - 1, sorted.count * 998 / 1000)]
-    heatMax = max(p, 6 * a.noiseFloor)
+    heatMax = max(p, 3 * a.noiseFloor)
     heat = heatImage(
       values: values, width: a.gridWidth, height: a.gridHeight, maxValue: heatMax,
       quarterTurns: info.quarterTurns)

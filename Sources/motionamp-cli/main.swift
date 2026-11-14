@@ -6,8 +6,8 @@ import UniformTypeIdentifiers
 
 // Command-line front end for the engine. Used for scripted checks.
 //
-//   motionamp-cli analyze VIDEO [--lo HZ --hi HZ] [--heat PNG]
-//   motionamp-cli render VIDEO OUTPUT --lo HZ --hi HZ [--alpha N] [--max-dim N]
+//   motionamp-cli analyze VIDEO [--lo HZ --hi HZ] [--heat PNG] [--fps CAPTURE_RATE]
+//   motionamp-cli render VIDEO OUTPUT --lo HZ --hi HZ [--alpha N] [--max-dim N] [--fps CAPTURE_RATE]
 //   motionamp-cli audio VIDEO OUTPUT [--lo HZ --hi HZ]
 
 var positional: [String] = []
@@ -39,7 +39,8 @@ do {
   case "analyze":
     let info = try await VideoInfo.load(source)
     print("video: \(info.width)x\(info.height), \(info.fps) fps nominal, \(info.duration) s")
-    let a = try await analyzeMotion(url: source)
+    var a = try await analyzeMotion(url: source)
+    if let fps = number("fps") { a = a.rescaled(fps: fps) }
     print("frames: \(a.frames), measured fps: \(a.fps), grid: \(a.gridWidth)x\(a.gridHeight)")
     print("motion peaks:")
     for p in a.peaks(count: 5) {
@@ -81,7 +82,7 @@ do {
     }
     try await renderMagnified(
       url: source, output: URL(fileURLWithPath: positional[2]), lo: lo, hi: hi,
-      alpha: number("alpha") ?? 20, maxDimension: number("max-dim").map { Int($0) })
+      alpha: number("alpha") ?? 20, fps: number("fps"), maxDimension: number("max-dim").map { Int($0) })
   case "audio":
     guard positional.count >= 3 else { fail("audio needs OUTPUT") }
     guard let audio = try await AudioData.load(source) else { fail("no audio track") }
