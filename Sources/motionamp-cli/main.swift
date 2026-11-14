@@ -7,7 +7,8 @@ import UniformTypeIdentifiers
 // Command-line front end for the engine. Used for scripted checks.
 //
 //   motionamp-cli analyze VIDEO [--lo HZ --hi HZ] [--heat PNG] [--fps CAPTURE_RATE]
-//   motionamp-cli render VIDEO OUTPUT --lo HZ --hi HZ [--alpha N] [--max-dim N] [--fps CAPTURE_RATE]
+//   motionamp-cli render VIDEO OUTPUT --lo HZ --hi HZ [--alpha N] [--sigma N] [--max-dim N]
+//     [--fps CAPTURE_RATE]
 //   motionamp-cli audio VIDEO OUTPUT [--lo HZ --hi HZ]
 
 var positional: [String] = []
@@ -82,7 +83,7 @@ do {
     }
     try await renderMagnified(
       url: source, output: URL(fileURLWithPath: positional[2]), lo: lo, hi: hi,
-      alpha: number("alpha") ?? 20, fps: number("fps"), maxDimension: number("max-dim").map { Int($0) })
+      alpha: number("alpha") ?? 20, sigma: number("sigma") ?? 2, fps: number("fps"), maxDimension: number("max-dim").map { Int($0) })
   case "audio":
     guard positional.count >= 3 else { fail("audio needs OUTPUT") }
     guard let audio = try await AudioData.load(source) else { fail("no audio track") }

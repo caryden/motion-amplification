@@ -137,9 +137,11 @@ public final class Magnifier {
   ///   - scales: The number of pyramid levels. Default: `PyramidFilters.defaultScales`.
   ///   - orients: The number of orientations per level.
   ///   - sections: The number of cascaded biquad sections in the temporal filter.
+  ///   - sigma: The width of the amplitude-weighted Gaussian that smooths the
+  ///     filtered phase, in samples of each level. If 0, the phase isn't smoothed.
   public init(
     width: Int, height: Int, fps: Double, lo: Double, hi: Double, alpha: Double,
-    scales: Int? = nil, orients: Int = 4, sections: Int = 2
+    scales: Int? = nil, orients: Int = 4, sections: Int = 2, sigma: Double = 0
   ) throws {
     guard lo > 0, hi > lo, hi < fps / 2 else {
       throw EngineError.message("The band must satisfy 0 < lo < hi < fps / 2.")
@@ -155,6 +157,32 @@ public final class Magnifier {
       c.scalar(bq.b0), c.scalar(bq.b1), c.scalar(bq.b2), c.scalar(bq.a1), c.scalar(bq.a2)
     )
     let gain = c.scalar(alpha)
+
+    // Separable Gaussian with a radius of ceil(3 sigma), as [1, 1, 1, n] and
+    // [1, 1, n, 1] convolution weights.
+    var blur: ((MPSGraphTensor, Int, Int) -> MPSGraphTensor)?
+    if sigma > 0 {
+      let r = Int((3 * sigma).rounded(.up))
+      var k = (-r...r).map { exp(-Double($0 * $0) / (2 * sigma * sigma)) }
+      let sum = k.reduce(0, +)
+      k = k.map { $0 / sum }
+      let taps = k.map { Float($0) }
+      let wx = c.const(taps, [1, 1, 1, taps.count])
+      let wy = c.const(taps, [1, 1, taps.count, 1])
+      func descriptor(_ px: Int, _ py: Int) -> MPSGraphConvolution2DOpDescriptor {
+        MPSGraphConvolution2DOpDescriptor(
+          strideInX: 1, strideInY: 1, dilationRateInX: 1, dilationRateInY: 1, groups: 1,
+          paddingLeft: px, paddingRight: px, paddingTop: py, paddingBottom: py,
+          paddingStyle: .explicit, dataLayout: .NCHW, weightsLayout: .OIHW)!
+      }
+      blur = { t, hk, wk in
+        // Each orientation is one single-channel image in the batch.
+        var o = c.g.reshape(t, shape: GraphContext.ns([orients, 1, hk, wk]), name: nil)
+        o = c.g.convolution2D(o, weights: wy, descriptor: descriptor(0, r), name: nil)
+        o = c.g.convolution2D(o, weights: wx, descriptor: descriptor(r, 0), name: nil)
+        return c.g.reshape(o, shape: GraphContext.ns([orients, hk, wk]), name: nil)
+      }
+    }
 
     yIn = c.placeholder([height, width])
     let zero = c.g.constant(0, shape: GraphContext.ns([height, width]), dataType: .float32)
@@ -192,6 +220,14 @@ public final class Magnifier {
         stateOut += [z1n, z2n]
         stateData += [c.zeros(shape), c.zeros(shape)]
         v = y
+      }
+
+      if let blur {
+        // Weak coefficients have noisy phase. Weight by amplitude so that
+        // strong neighbors set their value.
+        let amp = c.g.squareRoot(with: c.add(c.mul(cRe, cRe), c.mul(cIm, cIm)), name: nil)
+        v = c.g.division(
+          blur(c.mul(v, amp), hk, wk), c.add(blur(amp, hk, wk), c.scalar(1e-9)), name: nil)
       }
 
       let phi = c.mul(gain, v)

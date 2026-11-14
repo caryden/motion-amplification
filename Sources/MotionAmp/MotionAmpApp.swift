@@ -10,7 +10,7 @@ struct MotionAmpApp: App {
     WindowGroup("Motion Amp") {
       ContentView()
         .environmentObject(model)
-        .frame(minWidth: 960, minHeight: 680)
+        .frame(minWidth: 1100, minHeight: 720)
         .onAppear {
           // Launch arguments: [--fps RATE] [--lo HZ] [--hi HZ] [VIDEO].
           var args = Array(CommandLine.arguments.dropFirst())

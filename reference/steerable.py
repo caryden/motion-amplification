@@ -105,12 +105,39 @@ def bandpass_biquad(lo, hi, fs):
   return (alpha / a0, 0.0, -alpha / a0, -2 * cos(w0) / a0, (1 - alpha) / a0)
 
 
-def magnify(frames, fs, lo, hi, alpha, scales, orients, sections=2):
+def gaussian_kernel(sigma):
+  """Creates a normalized 1D Gaussian kernel with a radius of ceil(3 sigma)."""
+  r = int(np.ceil(3 * sigma))
+  x = np.arange(-r, r + 1)
+  k = np.exp(-x**2 / (2 * sigma**2))
+  return k / k.sum()
+
+
+def blur(a, kernel):
+  """Blurs the last two axes with a separable kernel and zero padding."""
+  r = len(kernel) // 2
+  for axis in (-2, -1):
+    pad = [(0, 0)] * a.ndim
+    pad[axis] = (r, r)
+    p = np.pad(a, pad)
+    n = a.shape[axis]
+    a = sum(kj * np.take(p, range(j, j + n), axis=axis)
+            for j, kj in enumerate(kernel))
+  return a
+
+
+def magnify(frames, fs, lo, hi, alpha, scales, orients, sections=2,
+            sigma=0.0):
   """Magnifies motion in the [lo, hi] Hz band by a factor of (1 + alpha).
 
   The temporal filter is a causal cascade of identical biquad sections in
   transposed direct form II, applied to the phase difference between each
   frame and the first frame.
+
+  If sigma is greater than 0, the filtered phase of each level is smoothed
+  with a Gaussian of that width, in samples of the level, weighted by the
+  coefficient amplitude. Weak coefficients have noisy phase, so the weighting
+  lets strong neighbors set their value.
 
   Args:
     frames: A real array of shape [t, h, w].
@@ -136,6 +163,10 @@ def magnify(frames, fs, lo, hi, alpha, scales, orients, sections=2):
         z[0] = b1 * v - a1 * y + z[1]
         z[1] = b2 * v - a2 * y
         v = y
+      if sigma > 0:
+        kernel = gaussian_kernel(sigma)
+        amp = np.abs(c)
+        v = blur(v * amp, kernel) / (blur(amp, kernel) + 1e-9)
       new.append(c * np.exp(1j * alpha * v))
     out[i] = synthesize(spectrum, new, bands, residual)
   return out

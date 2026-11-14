@@ -120,6 +120,32 @@ public struct MotionAnalysis: Sendable {
     return Array(amplitude[c * bins..<(c + 1) * bins])
   }
 
+  /// Gets the peaks of the global spectrum that stand clear of the noise around them.
+  ///
+  /// A bin qualifies if it is the largest within three bins on each side and
+  /// its amplitude is at least `ratio` times the median of the surrounding bins.
+  ///
+  /// - Returns: Up to `count` pairs of frequency in Hz and amplitude, most distinct first.
+  public func distinctPeaks(count: Int, ratio: Float = 1.3, minHz: Double = 0.3)
+    -> [(hz: Double, amplitude: Float)]
+  {
+    let s = globalSpectrum
+    // The window reaches three bins to each side, so start at bin 3 or later.
+    let first = max(3, Int((minHz / binHz).rounded(.up)))
+    let span = max(8, bins / 40)
+    guard first + 4 < bins else { return [] }
+    var found: [(Double, Float, Float)] = []
+    for i in first..<bins - 3 {
+      guard s[i] == s[i - 3...i + 3].max() else { continue }
+      let around = (Array(s[max(1, i - span)..<i - 2]) + Array(s[i + 3..<min(bins, i + span + 1)]))
+        .sorted()
+      guard !around.isEmpty else { continue }
+      let base = max(1e-12, around[around.count / 2])
+      if s[i] / base >= ratio { found.append((Double(i) * binHz, s[i], s[i] / base)) }
+    }
+    return found.sorted { $0.2 > $1.2 }.prefix(count).map { (hz: $0.0, amplitude: $0.1) }
+  }
+
   /// Gets the strongest local maxima of the global spectrum.
   ///
   /// - Returns: Up to `count` pairs of frequency in Hz and amplitude, strongest first.

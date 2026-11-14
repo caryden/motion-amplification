@@ -7,13 +7,17 @@ struct ContentView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      header
+      HStack(spacing: 0) {
+        VStack(spacing: 0) {
+          videoArea
+          transport.padding(.horizontal, 14).padding(.vertical, 8)
+          SpectrumView().frame(height: 210).padding(.horizontal, 14).padding(.bottom, 12)
+        }
+        Divider()
+        Sidebar().frame(width: 290)
+      }
       Divider()
-      videoArea
-      Divider()
-      transport.padding(.horizontal, 12).padding(.vertical, 6)
-      SpectrumView().frame(height: 170).padding(.horizontal, 12)
-      controls.padding(12)
+      statusBar
     }
     .onDrop(of: [.fileURL], isTargeted: nil) { providers in
       _ = providers.first?.loadObject(ofClass: URL.self) { url, _ in
@@ -21,34 +25,6 @@ struct ContentView: View {
       }
       return true
     }
-  }
-
-  private var header: some View {
-    HStack(spacing: 12) {
-      Button("Open Video…") { model.openPanel() }
-      if let info = model.info {
-        Text(info.url.lastPathComponent).fontWeight(.medium)
-        Text("\(Int(info.displaySize.width))×\(Int(info.displaySize.height))")
-          .foregroundStyle(.secondary)
-        if model.analysis != nil {
-          Text("Capture fps").padding(.leading, 8)
-          TextField(
-            "",
-            value: Binding(get: { model.captureFps }, set: { model.setCaptureFps($0) }),
-            format: .number.precision(.fractionLength(0...2))
-          )
-          .textFieldStyle(.roundedBorder).frame(width: 70).multilineTextAlignment(.trailing)
-          .help("Set the true capture rate for high-speed footage that is stored at a slower rate.")
-        }
-      }
-      Spacer()
-      Text(model.status).foregroundStyle(.secondary).lineLimit(1)
-      if let p = model.progress {
-        ProgressView(value: p).frame(width: 140)
-        Button("Cancel") { model.cancelJob() }
-      }
-    }
-    .padding(.horizontal, 12).padding(.vertical, 8)
   }
 
   private var videoArea: some View {
@@ -71,9 +47,36 @@ struct ContentView: View {
           }
         }
         .aspectRatio(info.displaySize, contentMode: .fit)
+        .padding(10)
       } else {
-        Text("Drop a video here, or click Open Video.")
-          .foregroundStyle(.white.opacity(0.6))
+        VStack(spacing: 12) {
+          Image(systemName: "waveform.path.ecg.rectangle")
+            .font(.system(size: 44)).foregroundStyle(.white.opacity(0.5))
+          Text("Drop a video here").font(.title3).foregroundStyle(.white.opacity(0.8))
+          Button("Open Video…") { model.openPanel() }
+        }
+      }
+    }
+    .overlay(alignment: .top) {
+      if model.hasAmplified {
+        Picker(
+          "",
+          selection: Binding(
+            get: { model.showAmplified },
+            set: { v in
+              model.showAmplified = v
+              Task { await model.rebuildItem() }
+            })
+        ) {
+          Text("Original").tag(false)
+          Text("Amplified").tag(true)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 200)
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+        .padding(.top, 14)
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -91,90 +94,231 @@ struct ContentView: View {
       Slider(
         value: Binding(get: { model.time }, set: { model.seek($0) }),
         in: 0...max(0.01, model.info?.duration ?? 1))
-      Text(String(format: "%.2f s", model.time)).monospacedDigit().frame(width: 64)
+      Text(String(format: "%.2f s", model.time)).monospacedDigit()
+        .frame(width: 60, alignment: .trailing)
       Picker("Speed", selection: Binding(get: { model.rate }, set: { model.setRate($0) })) {
         Text("1×").tag(Float(1))
         Text("1/2×").tag(Float(0.5))
         Text("1/4×").tag(Float(0.25))
         Text("1/8×").tag(Float(0.125))
       }
-      .frame(width: 130)
-      Picker(
-        "",
-        selection: Binding(
-          get: { model.showAmplified },
-          set: { v in
-            model.showAmplified = v
-            Task { await model.rebuildItem() }
-          })
-      ) {
-        Text("Original").tag(false)
-        Text("Amplified").tag(true)
-      }
-      .pickerStyle(.segmented)
-      .frame(width: 180)
-      .disabled(!model.hasAmplified)
+      .labelsHidden()
+      .frame(width: 76)
+      .help("Playback speed")
     }
   }
 
-  private var controls: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(spacing: 10) {
-        Text("Band")
-        bandField(Binding(get: { model.lo }, set: { model.setBand(lo: $0, hi: model.hi, final: true) }))
-        Text("to")
-        bandField(Binding(get: { model.hi }, set: { model.setBand(lo: model.lo, hi: $0, final: true) }))
-        Text("Hz")
-        if let a = model.analysis {
-          Text("Peaks:").foregroundStyle(.secondary).padding(.leading, 8)
-          ForEach(a.peaks(count: 5), id: \.hz) { p in
-            Button(String(format: "%.1f Hz", p.hz)) { model.selectPeak(p.hz) }
-              .buttonStyle(.bordered).controlSize(.small)
-          }
-        }
-        Spacer()
-        if model.heatMax > 0 {
-          Text(String(format: "Red = %.3f px or more", model.heatMax)).foregroundStyle(.secondary)
+  private var statusBar: some View {
+    HStack(spacing: 10) {
+      Text(model.status).lineLimit(1).truncationMode(.tail)
+      Spacer()
+      if let p = model.progress {
+        ProgressView(value: p).frame(width: 160)
+        Button("Cancel") { model.cancelJob() }.controlSize(.small)
+      }
+    }
+    .font(.callout)
+    .foregroundStyle(.secondary)
+    .padding(.horizontal, 14)
+    .frame(height: 30)
+  }
+}
+
+/// Holds the clip, band, view, and render settings.
+struct Sidebar: View {
+  @EnvironmentObject var model: AppModel
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        clip
+        if model.analysis != nil {
+          band
+          view
+          amplify
         }
       }
-      HStack(spacing: 14) {
-        Toggle("Heat map", isOn: $model.showOverlay)
-        Slider(value: $model.overlayOpacity, in: 0.1...1).frame(width: 90)
-        Toggle(
-          "Filter audio to band",
-          isOn: Binding(
-            get: { model.filterAudio },
-            set: { v in
-              model.filterAudio = v
-              Task { await model.rebuildItem() }
-            }))
-        Spacer()
-        Text(String(format: "Gain %.0f", model.alpha)).monospacedDigit()
-        Slider(value: $model.alpha, in: 2...200).frame(width: 130)
-        Picker("Size", selection: $model.renderMaxDimension) {
+      .padding(16)
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .background(Color(nsColor: .windowBackgroundColor))
+  }
+
+  private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content)
+    -> some View
+  {
+    VStack(alignment: .leading, spacing: 9) {
+      Text(title.uppercased()).font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
+      content()
+    }
+  }
+
+  private func row<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content)
+    -> some View
+  {
+    HStack {
+      Text(label)
+      Spacer(minLength: 8)
+      content()
+    }
+  }
+
+  private var clip: some View {
+    section("Clip") {
+      if let info = model.info {
+        Text(info.url.lastPathComponent).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
+        Text(
+          "\(Int(info.displaySize.width))×\(Int(info.displaySize.height))"
+            + (model.analysis.map { ", \($0.frames) frames" } ?? "")
+        )
+        .foregroundStyle(.secondary)
+        if model.analysis != nil {
+          row("Capture rate") {
+            TextField(
+              "",
+              value: Binding(get: { model.captureFps }, set: { model.setCaptureFps($0) }),
+              format: .number.precision(.fractionLength(0...2))
+            )
+            .textFieldStyle(.roundedBorder).frame(width: 70).multilineTextAlignment(.trailing)
+            Text("fps").foregroundStyle(.secondary)
+          }
+          .help("Set the true capture rate for high-speed footage that is stored at a slower rate.")
+        }
+      } else {
+        Text("No clip is open.").foregroundStyle(.secondary)
+      }
+      Button("Open Video…") { model.openPanel() }
+    }
+  }
+
+  private var band: some View {
+    section("Frequency band") {
+      HStack(spacing: 6) {
+        bandField(
+          Binding(get: { model.lo }, set: { model.setBand(lo: $0, hi: model.hi, final: true) }))
+        Text("to")
+        bandField(
+          Binding(get: { model.hi }, set: { model.setBand(lo: model.lo, hi: $0, final: true) }))
+        Text("Hz").foregroundStyle(.secondary)
+      }
+      if model.peaks.isEmpty {
+        Text("No distinct peaks. Drag on the plot to select a band.")
+          .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+      } else {
+        Text("Distinct peaks").font(.callout).foregroundStyle(.secondary)
+        LazyVGrid(
+          columns: [GridItem(.adaptive(minimum: 78), spacing: 6)], alignment: .leading, spacing: 6
+        ) {
+          ForEach(model.peaks, id: \.hz) { p in
+            let selected = p.hz >= model.lo && p.hz <= model.hi
+            Button {
+              model.selectPeak(p.hz)
+            } label: {
+              Text(String(format: "%.1f Hz", p.hz))
+                .fontWeight(selected ? .semibold : .regular)
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 3)
+                .background(
+                  selected ? Color.accentColor : Color(nsColor: .controlColor),
+                  in: RoundedRectangle(cornerRadius: 5)
+                )
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(.gray.opacity(0.3)))
+            }
+            .buttonStyle(.plain)
+          }
+        }
+      }
+    }
+  }
+
+  private var view: some View {
+    section("Heat map") {
+      Toggle("Show where the frame moves", isOn: $model.showOverlay)
+      row("Opacity") {
+        Slider(value: $model.overlayOpacity, in: 0.1...1).frame(width: 150)
+      }
+      .disabled(!model.showOverlay)
+      VStack(alignment: .leading, spacing: 3) {
+        // The same ramp that `heatImage` draws.
+        LinearGradient(
+          colors: [.blue.opacity(0.15), .cyan, .green, .yellow, .red], startPoint: .leading,
+          endPoint: .trailing
+        )
+        .frame(height: 10)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        HStack {
+          Text("0")
+          Spacer()
+          Text(String(format: "%.3f px or more", model.heatMax))
+        }
+        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+      }
+      Text(model.cellLabel.isEmpty ? "Click the video to inspect one point." : model.cellLabel)
+        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+      Toggle(
+        "Filter audio to the band",
+        isOn: Binding(
+          get: { model.filterAudio },
+          set: { v in
+            model.filterAudio = v
+            Task { await model.rebuildItem() }
+          })
+      )
+      .disabled(model.audioSpectrum == nil)
+      if model.audioSpectrum == nil {
+        Text("This clip has no audio track.").font(.callout).foregroundStyle(.secondary)
+      }
+    }
+  }
+
+  private var amplify: some View {
+    section("Amplify") {
+      row(String(format: "Gain %.0f", model.alpha)) {
+        Slider(value: $model.alpha, in: 2...200).frame(width: 150)
+      }
+      .monospacedDigit()
+      row("Smoothing") {
+        Picker("", selection: $model.smoothing) {
+          Text("Off").tag(0.0)
+          Text("2").tag(2.0)
+          Text("4").tag(4.0)
+        }
+        .pickerStyle(.segmented).labelsHidden().frame(width: 150)
+      }
+      .help("Smooths the amplified motion across neighboring pixels to suppress noise.")
+      row("Output size") {
+        Picker("", selection: $model.renderMaxDimension) {
           Text("Full").tag(0)
           Text("1920").tag(1920)
           Text("1280").tag(1280)
         }
-        .frame(width: 120)
-        Button("Render Amplified Video") { model.render() }
-          .fixedSize()
-          .disabled(model.analysis == nil || model.busy)
-        Button("Export…") { model.export() }.fixedSize()
-          .disabled(model.info == nil || model.busy)
+        .pickerStyle(.segmented).labelsHidden().frame(width: 150)
       }
-      HStack {
-        Text(model.cellLabel.isEmpty ? "Click the video to inspect one point." : model.cellLabel)
-        Spacer()
-        if model.hasAmplified { Text("Amplified render: \(model.amplifiedLabel)") }
+      Button {
+        model.render()
+      } label: {
+        Text("Render Amplified Video").frame(maxWidth: .infinity)
       }
-      .font(.callout).foregroundStyle(.secondary)
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+      .disabled(model.busy)
+      if model.hasAmplified {
+        Text("Rendered: \(model.amplifiedLabel)")
+          .font(.callout).foregroundStyle(.secondary)
+        Button {
+          model.export()
+        } label: {
+          Text("Export…").frame(maxWidth: .infinity)
+        }
+        .disabled(model.busy)
+      }
     }
   }
 
   private func bandField(_ value: Binding<Double>) -> some View {
     TextField("", value: value, format: .number.precision(.fractionLength(1)))
-      .textFieldStyle(.roundedBorder).frame(width: 64).multilineTextAlignment(.trailing)
+      .textFieldStyle(.roundedBorder).frame(width: 70).multilineTextAlignment(.trailing)
   }
 }
 
@@ -182,6 +326,8 @@ struct ContentView: View {
 struct SpectrumView: View {
   @EnvironmentObject var model: AppModel
   private let rangeDb: Float = 50
+  private let axisHeight: CGFloat = 18
+  private let headroom: CGFloat = 22
 
   var body: some View {
     GeometryReader { geo in
@@ -190,7 +336,8 @@ struct SpectrumView: View {
         draw(&ctx, size: size, nyquist: nyquist)
       }
       .background(Color(nsColor: .textBackgroundColor))
-      .clipShape(RoundedRectangle(cornerRadius: 6))
+      .clipShape(RoundedRectangle(cornerRadius: 8))
+      .overlay(RoundedRectangle(cornerRadius: 8).stroke(.gray.opacity(0.25)))
       .gesture(
         DragGesture(minimumDistance: 0)
           .onChanged { g in band(g, geo.size.width, nyquist, final: false) }
@@ -223,16 +370,20 @@ struct SpectrumView: View {
     }
   }
 
+  private func yFor(_ db: Float, _ size: CGSize) -> CGFloat {
+    headroom + (size.height - axisHeight - headroom) * CGFloat(-db / rangeDb)
+  }
+
   private func path(_ cols: [Float], size: CGSize, closed: Bool) -> Path {
     var p = Path()
-    let h = size.height - 16
+    let floor = size.height - axisHeight
     for (x, db) in cols.enumerated() {
-      let pt = CGPoint(x: CGFloat(x), y: h * CGFloat(-db / rangeDb))
+      let pt = CGPoint(x: CGFloat(x), y: yFor(db, size))
       if x == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
     }
     if closed, !cols.isEmpty {
-      p.addLine(to: CGPoint(x: CGFloat(cols.count - 1), y: h))
-      p.addLine(to: CGPoint(x: 0, y: h))
+      p.addLine(to: CGPoint(x: CGFloat(cols.count - 1), y: floor))
+      p.addLine(to: CGPoint(x: 0, y: floor))
       p.closeSubpath()
     }
     return p
@@ -240,16 +391,18 @@ struct SpectrumView: View {
 
   private func draw(_ ctx: inout GraphicsContext, size: CGSize, nyquist: Double) {
     let width = Int(size.width)
-    let step = [1.0, 2, 5, 10, 20, 25, 50, 100].first { nyquist / $0 <= 12 } ?? 200
+    let floor = size.height - axisHeight
+    let step = [0.5, 1.0, 2, 5, 10, 20, 25, 50, 100].first { nyquist / $0 <= 12 } ?? 200
     var f = step
     while f < nyquist {
       let x = CGFloat(f / nyquist) * size.width
       ctx.stroke(
-        Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height - 16)) },
-        with: .color(.gray.opacity(0.2)))
+        Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: floor)) },
+        with: .color(.gray.opacity(0.18)))
       ctx.draw(
-        Text(String(format: "%.0f Hz", f)).font(.caption2).foregroundStyle(.secondary),
-        at: CGPoint(x: x, y: size.height - 7))
+        Text(String(format: step < 1 ? "%.1f Hz" : "%.0f Hz", f)).font(.caption2)
+          .foregroundStyle(.secondary),
+        at: CGPoint(x: x, y: size.height - axisHeight / 2))
       f += step
     }
     guard let a = model.analysis else {
@@ -261,13 +414,19 @@ struct SpectrumView: View {
     // Selected band.
     let x0 = CGFloat(model.lo / nyquist) * size.width
     let x1 = CGFloat(model.hi / nyquist) * size.width
-    ctx.fill(
-      Path(CGRect(x: x0, y: 0, width: max(2, x1 - x0), height: size.height - 16)),
-      with: .color(.accentColor.opacity(0.22)))
+    let bandRect = CGRect(x: x0, y: 0, width: max(2, x1 - x0), height: floor)
+    ctx.fill(Path(bandRect), with: .color(.accentColor.opacity(0.18)))
+    ctx.stroke(
+      Path { p in
+        for x in [bandRect.minX, bandRect.maxX] {
+          p.move(to: CGPoint(x: x, y: 0))
+          p.addLine(to: CGPoint(x: x, y: floor))
+        }
+      }, with: .color(.accentColor.opacity(0.7)), lineWidth: 1)
 
     let motion = columns(a.globalSpectrum, binHz: a.binHz, nyquist: nyquist, width: width)
-    ctx.fill(path(motion, size: size, closed: true), with: .color(.teal.opacity(0.45)))
-    ctx.stroke(path(motion, size: size, closed: false), with: .color(.teal), lineWidth: 1)
+    ctx.fill(path(motion, size: size, closed: true), with: .color(.teal.opacity(0.35)))
+    ctx.stroke(path(motion, size: size, closed: false), with: .color(.teal), lineWidth: 1.2)
     if let s = model.audioSpectrum {
       let audio = columns(s.amplitude, binHz: s.binHz, nyquist: nyquist, width: width)
       ctx.stroke(path(audio, size: size, closed: false), with: .color(.orange), lineWidth: 1.2)
@@ -276,13 +435,26 @@ struct SpectrumView: View {
       let cell = columns(s, binHz: a.binHz, nyquist: nyquist, width: width)
       ctx.stroke(path(cell, size: size, closed: false), with: .color(.purple), lineWidth: 1.2)
     }
+    // Label each distinct peak over the motion curve.
+    for p in model.peaks {
+      let x = Int(p.hz / nyquist * Double(width))
+      guard x >= 0, x < motion.count else { continue }
+      let near = motion[max(0, x - 2)...min(motion.count - 1, x + 2)].max() ?? motion[x]
+      let y = yFor(near, size)
+      ctx.fill(
+        Path(ellipseIn: CGRect(x: CGFloat(x) - 2.5, y: y - 2.5, width: 5, height: 5)),
+        with: .color(.teal))
+      ctx.draw(
+        Text(String(format: "%.1f", p.hz)).font(.caption2).fontWeight(.semibold)
+          .foregroundStyle(.primary),
+        at: CGPoint(x: min(max(18, CGFloat(x)), size.width - 18), y: max(8, y - 10)))
+    }
     var legend = Text("■ Motion ").foregroundStyle(.teal)
     if model.audioSpectrum != nil { legend = legend + Text("■ Audio ").foregroundStyle(.orange) }
-    if model.cellSpectrum != nil { legend = legend + Text("■ Selected point").foregroundStyle(.purple) }
-    ctx.draw(legend.font(.caption), at: CGPoint(x: size.width - 8, y: 10), anchor: .trailing)
+    if model.cellSpectrum != nil {
+      legend = legend + Text("■ Selected point").foregroundStyle(.purple)
+    }
     ctx.draw(
-      Text("Each curve is in dB under its own peak. Drag to select a band.")
-        .font(.caption2).foregroundStyle(.secondary),
-      at: CGPoint(x: 8, y: 10), anchor: .leading)
+      legend.font(.caption), at: CGPoint(x: size.width - 10, y: 11), anchor: .trailing)
   }
 }

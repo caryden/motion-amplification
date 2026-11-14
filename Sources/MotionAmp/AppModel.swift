@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
   @Published var lo = 5.0
   @Published var hi = 15.0
   @Published var alpha = 20.0
+  @Published var smoothing = 2.0
   @Published var showOverlay = true
   @Published var overlayOpacity = 0.85
   @Published var heat: CGImage?
@@ -28,6 +29,8 @@ final class AppModel: ObservableObject {
   @Published var cellSpectrum: [Float]?
   @Published var cellLabel = ""
   @Published var captureFps = 0.0
+  /// The distinct peaks of the motion spectrum, in ascending frequency order.
+  @Published var peaks: [(hz: Double, amplitude: Float)] = []
   /// Values of the `--fps`, `--lo`, and `--hi` launch arguments.
   var launchOptions: [String: Double] = [:]
 
@@ -72,6 +75,7 @@ final class AppModel: ObservableObject {
     player.pause()
     isPlaying = false
     analysis = nil
+    peaks = []
     audioSpectrum = nil
     audio = nil
     heat = nil
@@ -98,9 +102,10 @@ final class AppModel: ObservableObject {
           audioSpectrum = await Task.detached { a.spectrum() }.value
         }
         analysis = result
+        peaks = result.distinctPeaks(count: 6).sorted { $0.hz < $1.hz }
         captureFps = result.fps
         progress = nil
-        if let top = result.peaks(count: 1).first {
+        if let top = result.distinctPeaks(count: 1).first ?? result.peaks(count: 1).first {
           selectPeak(top.hz)
         } else {
           setBand(lo: lo, hi: hi, final: true)
@@ -161,6 +166,7 @@ final class AppModel: ObservableObject {
     }
     let ratio = fps / a.fps
     analysis = a.rescaled(fps: fps)
+    peaks = analysis!.distinctPeaks(count: 6).sorted { $0.hz < $1.hz }
     captureFps = fps
     cellSpectrum = nil
     cellLabel = ""
@@ -299,7 +305,7 @@ final class AppModel: ObservableObject {
 
   func render() {
     guard let info, let a = analysis, !busy else { return }
-    let (lo, hi, alpha) = (self.lo, self.hi, self.alpha)
+    let (lo, hi, alpha, sigma) = (self.lo, self.hi, self.alpha, self.smoothing)
     let maxDim = renderMaxDimension > 0 ? renderMaxDimension : nil
     let output = workDir.appendingPathComponent("amplified-\(UUID().uuidString).mov")
     status = "Rendering amplified video"
@@ -309,7 +315,8 @@ final class AppModel: ObservableObject {
         let started = Date()
         try await Task.detached(priority: .userInitiated) { [weak self] in
           try await renderMagnified(
-            url: info.url, output: output, lo: lo, hi: hi, alpha: alpha, fps: a.fps,
+            url: info.url, output: output, lo: lo, hi: hi, alpha: alpha, sigma: sigma,
+            fps: a.fps,
             maxDimension: maxDim
           ) { p in
             Task { @MainActor in self?.progress = p }

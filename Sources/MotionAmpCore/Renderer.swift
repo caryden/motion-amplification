@@ -13,19 +13,23 @@ import VideoToolbox
 ///   - lo: The lower edge of the temporal band in Hz.
 ///   - hi: The upper edge of the temporal band in Hz.
 ///   - alpha: The phase gain. Motion in the band is scaled by about `1 + alpha`.
+///   - sigma: The width of the amplitude-weighted phase smoothing, in samples
+///     of each pyramid level. If 0, the phase isn't smoothed.
 ///   - fps: The capture frame rate in Hz. If nil, uses the track's nominal rate.
 ///   - maxDimension: If set, the output is scaled so that the longer side is
 ///     at most this many pixels.
 ///   - progress: Called with a fraction from 0 to 1.
 public func renderMagnified(
-  url: URL, output: URL, lo: Double, hi: Double, alpha: Double, fps: Double? = nil,
+  url: URL, output: URL, lo: Double, hi: Double, alpha: Double, sigma: Double = 2,
+  fps: Double? = nil,
   maxDimension: Int? = nil, progress: @Sendable (Double) -> Void = { _ in }
 ) async throws {
   let info = try await VideoInfo.load(url)
   let reader = try await FrameReader(url: url, maxDimension: maxDimension)
   let (w, h) = (reader.width, reader.height)
   let rate = fps ?? info.fps
-  let magnifier = try Magnifier(width: w, height: h, fps: rate, lo: lo, hi: hi, alpha: alpha)
+  let magnifier = try Magnifier(
+    width: w, height: h, fps: rate, lo: lo, hi: hi, alpha: alpha, sigma: sigma)
 
   try? FileManager.default.removeItem(at: output)
   let writer = try AVAssetWriter(outputURL: output, fileType: .mov)

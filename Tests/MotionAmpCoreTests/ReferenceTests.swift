@@ -6,7 +6,7 @@ import XCTest
 final class ReferenceTests: XCTestCase {
   struct Manifest: Decodable {
     let h, w, scales, orients, frames: Int
-    let fs, lo, hi, alpha: Double
+    let fs, lo, hi, alpha, sigma: Double
     let biquad: [Double]
   }
 
@@ -61,12 +61,20 @@ final class ReferenceTests: XCTestCase {
   }
 
   func testMagnifiedVideoMatchesReference() throws {
+    try checkMagnified(sigma: 0, expected: "magnified")
+  }
+
+  func testSmoothedMagnifiedVideoMatchesReference() throws {
+    try checkMagnified(sigma: try manifest().sigma, expected: "magnified_smooth")
+  }
+
+  func checkMagnified(sigma: Double, expected name: String) throws {
     let m = try manifest()
     let video = try load("video")
-    let expected = try load("magnified")
+    let expected = try load(name)
     let mag = try Magnifier(
       width: m.w, height: m.h, fps: m.fs, lo: m.lo, hi: m.hi, alpha: m.alpha,
-      scales: m.scales, orients: m.orients)
+      scales: m.scales, orients: m.orients, sigma: sigma)
     let n = m.h * m.w
     var out = [Float](repeating: 0, count: n)
     var worst: Float = 0

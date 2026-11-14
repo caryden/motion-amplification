@@ -16,6 +16,7 @@ import steerable as sp
 
 H, W, SCALES, ORIENTS = 48, 64, 3, 4
 FS, LO, HI, ALPHA, FRAMES = 60.0, 8.0, 12.0, 8.0, 48
+SIGMA = 1.5
 OUT = pathlib.Path(__file__).parent / "fixtures"
 
 
@@ -83,7 +84,7 @@ def main():
   OUT.mkdir(exist_ok=True)
   manifest = {
       "h": H, "w": W, "scales": SCALES, "orients": ORIENTS, "fs": FS,
-      "lo": LO, "hi": HI, "alpha": ALPHA, "frames": FRAMES,
+      "lo": LO, "hi": HI, "alpha": ALPHA, "frames": FRAMES, "sigma": SIGMA,
       "biquad": list(sp.bandpass_biquad(LO, HI, FS)), "arrays": {},
   }
 
@@ -100,6 +101,8 @@ def main():
     save(f"coef{k}_im", c.imag)
   save("video", video)
   save("magnified", magnified)
+  save("magnified_smooth", sp.magnify(
+      video, FS, LO, HI, ALPHA, SCALES, ORIENTS, sigma=SIGMA))
   save("disp_x", dx)
   pooled, pooled_wt = sp.pooled_displacement(video, [1, 2, 3], 2, ORIENTS)
   save("pooled_disp", pooled)
