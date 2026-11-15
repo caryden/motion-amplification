@@ -135,3 +135,88 @@ public struct AudioData: Sendable {
     try file.write(from: buffer)
   }
 }
+
+/// Divides each bin of a spectrum by the median of the bins around it.
+///
+/// The result is about 1 for broadband noise and larger for a tone, whatever
+/// the overall slope of the spectrum.
+///
+/// - Parameters:
+///   - s: The amplitude spectrum.
+///   - count: The number of leading bins to process.
+///   - span: The number of bins on each side that form the median.
+func whitened(_ s: [Float], count: Int, span: Int) -> [Float] {
+  let n = min(count, s.count)
+  var out = [Float](repeating: 1, count: n)
+  out.withUnsafeMutableBufferPointer { o in
+    let op = o.baseAddress!
+    DispatchQueue.concurrentPerform(iterations: n) { i in
+      var around = Array(s[max(0, i - span)...min(s.count - 1, i + span)])
+      around.sort()
+      op[i] = s[i] / max(1e-20, around[around.count / 2])
+    }
+  }
+  return out
+}
+
+/// Gets the tones of a spectrum that stand clear of the noise around them.
+///
+/// - Parameters:
+///   - s: The amplitude spectrum.
+///   - binHz: The frequency step between bins.
+///   - ratio: The smallest multiple of the local median that counts as a tone.
+/// - Returns: Up to `count` pairs of frequency and amplitude, loudest first.
+public func spectrumPeaks(
+  _ s: [Float], binHz: Double, minHz: Double, maxHz: Double, count: Int, ratio: Float = 2.5
+) -> [(hz: Double, amplitude: Float)] {
+  let last = min(s.count - 1, Int(maxHz / binHz))
+  let first = max(8, Int(minHz / binHz))
+  guard first + 16 < last else { return [] }
+  // A wide median window keeps a tone that wanders in pitch from raising its own baseline.
+  let w = whitened(s, count: last + 1, span: 100)
+  // Ignore tones more than 40 dB under the loudest bin in range.
+  let floor = (s[first...last].max() ?? 0) / 100
+  var found: [(Double, Float)] = []
+  for i in first..<last - 8
+  where w[i] >= ratio && s[i] >= floor && s[i] == s[i - 8...i + 8].max() {
+    found.append((Double(i) * binHz, s[i]))
+  }
+  return found.sorted { $0.1 > $1.1 }.prefix(count).map { (hz: $0.0, amplitude: $0.1) }
+}
+
+/// Estimates the fundamental frequency of a harmonic series in a spectrum.
+///
+/// For each candidate, averages how far the spectrum rises over its local
+/// median at the candidate's first 12 multiples. A true fundamental scores
+/// high because most multiples land on tones. Half of a true fundamental
+/// scores lower because its odd multiples land on noise.
+///
+/// - Parameters:
+///   - s: The amplitude spectrum.
+///   - binHz: The frequency step between bins.
+///   - limitHz: The highest frequency whose multiples are scored.
+/// - Returns: The best candidate in Hz and its score, or nil if the spectrum is too short.
+public func estimateFundamental(
+  _ s: [Float], binHz: Double, minHz: Double = 20, maxHz: Double = 200, limitHz: Double = 3000
+) -> (hz: Double, score: Float)? {
+  let n = min(s.count, Int(limitHz / binHz) + 2)
+  guard n > 200 else { return nil }
+  let w = whitened(s, count: n, span: 40).map { max(0, min(3, log($0))) }
+  var best: (Double, Float)?
+  var f0 = minHz
+  while f0 <= maxHz {
+    let multiples = min(12, Int(limitHz / f0))
+    var total: Float = 0
+    for k in 1...multiples {
+      let center = Double(k) * f0
+      // Accept a tone within 0.7% of the multiple.
+      let a = max(0, Int((center * 0.993 / binHz).rounded(.down)))
+      let b = min(n - 1, Int((center * 1.007 / binHz).rounded(.up)))
+      if a <= b { total += w[a...b].max() ?? 0 }
+    }
+    let score = total / Float(multiples)
+    if best == nil || score > best!.1 { best = (f0, score) }
+    f0 += binHz / 2
+  }
+  return best.map { (hz: $0.0, score: $0.1) }
+}

@@ -18,16 +18,20 @@ import VideoToolbox
 ///   - fps: The capture frame rate in Hz. If nil, uses the track's nominal rate.
 ///   - maxDimension: If set, the output is scaled so that the longer side is
 ///     at most this many pixels.
+///   - cameraPath: The camera's displacement from the first frame, per frame,
+///     in source pixels, as `analyzeMotion` reports it. If set, camera motion
+///     isn't amplified. The output keeps the camera's own motion.
 ///   - progress: Called with a fraction from 0 to 1.
 public func renderMagnified(
   url: URL, output: URL, lo: Double, hi: Double, alpha: Double, sigma: Double = 2,
-  fps: Double? = nil,
-  maxDimension: Int? = nil, progress: @Sendable (Double) -> Void = { _ in }
+  fps: Double? = nil, maxDimension: Int? = nil, cameraPath: (x: [Float], y: [Float])? = nil,
+  progress: @Sendable (Double) -> Void = { _ in }
 ) async throws {
   let info = try await VideoInfo.load(url)
   let reader = try await FrameReader(url: url, maxDimension: maxDimension)
   let (w, h) = (reader.width, reader.height)
   let rate = fps ?? info.fps
+  let toRender = Float(w) / Float(info.width)
   let magnifier = try Magnifier(
     width: w, height: h, fps: rate, lo: lo, hi: hi, alpha: alpha, sigma: sigma)
 
@@ -80,7 +84,12 @@ public func renderMagnified(
       started = true
     }
     readLuma(pb, into: &y)
-    y.withUnsafeBufferPointer { magnifier.process($0, into: &out) }
+    var shift: (x: Float, y: Float) = (0, 0)
+    if let path = cameraPath, !path.x.isEmpty {
+      let i = min(count, path.x.count - 1)
+      shift = (path.x[i] * toRender, path.y[i] * toRender)
+    }
+    y.withUnsafeBufferPointer { magnifier.process($0, shift: shift, into: &out) }
     // The reader vends copied sample data, so the buffer is safe to edit in place.
     writeLuma(&out, to: pb)
     while !input.isReadyForMoreMediaData {

@@ -11,7 +11,10 @@ struct ContentView: View {
         VStack(spacing: 0) {
           videoArea
           transport.padding(.horizontal, 14).padding(.vertical, 8)
-          SpectrumView().frame(height: 210).padding(.horizontal, 14).padding(.bottom, 12)
+          SpectrumView().frame(height: 170).padding(.horizontal, 14).padding(.bottom, 8)
+          if model.audioSpectrum != nil {
+            AudioSpectrumView().frame(height: 140).padding(.horizontal, 14).padding(.bottom, 12)
+          }
         }
         Divider()
         Sidebar().frame(width: 290)
@@ -134,6 +137,7 @@ struct Sidebar: View {
         clip
         if model.analysis != nil {
           band
+          if model.audioSpectrum != nil { rotation }
           view
           amplify
         }
@@ -183,6 +187,14 @@ struct Sidebar: View {
             Text("fps").foregroundStyle(.secondary)
           }
           .help("Set the true capture rate for high-speed footage that is stored at a slower rate.")
+          Toggle(
+            "Remove camera motion",
+            isOn: Binding(get: { model.removeCamera }, set: { model.setRemoveCamera($0) })
+          )
+          .disabled(model.busy)
+          .help(
+            "Cancels the shift that most of the frame shares, such as handheld shake. Motion that the whole scene shares is removed with it."
+          )
         }
       } else {
         Text("No clip is open.").foregroundStyle(.secondary)
@@ -229,6 +241,31 @@ struct Sidebar: View {
           }
         }
       }
+    }
+  }
+
+  private var rotation: some View {
+    section("Rotation") {
+      row("Frequency") {
+        TextField(
+          "", value: $model.fundamental, format: .number.precision(.fractionLength(1))
+        )
+        .textFieldStyle(.roundedBorder).frame(width: 70).multilineTextAlignment(.trailing)
+        Text("Hz").foregroundStyle(.secondary)
+      }
+      if model.fundamental > 0 {
+        Text(String(format: "%.0f rpm", model.fundamental * 60))
+          .monospacedDigit().foregroundStyle(.secondary)
+      }
+      HStack(spacing: 6) {
+        Button("Estimate") { model.estimateRotation() }
+        Button("÷2") { model.fundamental /= 2 }.disabled(model.fundamental <= 0)
+        Button("×2") { model.fundamental *= 2 }.disabled(model.fundamental <= 0)
+        Button("Clear") { model.fundamental = 0 }.disabled(model.fundamental <= 0)
+      }
+      .controlSize(.small)
+      Text("Click a tone in the audio plot to mark its multiples on both plots.")
+        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
   }
 
@@ -435,6 +472,26 @@ struct SpectrumView: View {
       let cell = columns(s, binHz: a.binHz, nyquist: nyquist, width: width)
       ctx.stroke(path(cell, size: size, closed: false), with: .color(.purple), lineWidth: 1.2)
     }
+    // Mark where each multiple of the rotation frequency lands. A multiple
+    // past the camera's limit folds to a lower frequency and is drawn dashed.
+    if model.fundamental > 0 {
+      var lastX: CGFloat = -100
+      for k in 1...8 {
+        let f = Double(k) * model.fundamental
+        let folded = f > nyquist
+        let x = CGFloat(model.aliased(f) / nyquist) * size.width
+        ctx.stroke(
+          Path { $0.move(to: CGPoint(x: x, y: 14)); $0.addLine(to: CGPoint(x: x, y: floor)) },
+          with: .color(.orange.opacity(0.8)),
+          style: StrokeStyle(lineWidth: 1, dash: folded ? [3, 3] : []))
+        if abs(x - lastX) > 16 || !folded {
+          ctx.draw(
+            Text("\(k)×").font(.caption2).foregroundStyle(.orange),
+            at: CGPoint(x: min(max(10, x), size.width - 10), y: 7))
+          lastX = x
+        }
+      }
+    }
     // Label each distinct peak over the motion curve.
     for p in model.peaks {
       let x = Int(p.hz / nyquist * Double(width))
@@ -455,6 +512,7 @@ struct SpectrumView: View {
       legend = legend + Text("■ Selected point").foregroundStyle(.purple)
     }
     ctx.draw(
-      legend.font(.caption), at: CGPoint(x: size.width - 10, y: 11), anchor: .trailing)
+      legend.font(.caption),
+      at: CGPoint(x: size.width - 10, y: model.fundamental > 0 ? 25 : 11), anchor: .trailing)
   }
 }

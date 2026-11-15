@@ -10,15 +10,16 @@ struct MotionAmpApp: App {
     WindowGroup("Motion Amp") {
       ContentView()
         .environmentObject(model)
-        .frame(minWidth: 1100, minHeight: 720)
+        .frame(minWidth: 1100, minHeight: 820)
         .onAppear {
-          // Launch arguments: [--fps RATE] [--lo HZ] [--hi HZ] [VIDEO], or --demo ID.
+          // Launch arguments: [--fps RATE] [--lo HZ] [--hi HZ] [--rotation HZ] [VIDEO],
+          // or --demo ID.
           var args = Array(CommandLine.arguments.dropFirst())
           var path: String?
           var demo: Demo?
           while !args.isEmpty {
             let a = args.removeFirst()
-            if ["--fps", "--lo", "--hi"].contains(a), !args.isEmpty {
+            if ["--fps", "--lo", "--hi", "--rotation"].contains(a), !args.isEmpty {
               model.launchOptions[a] = Double(args.removeFirst())
             } else if a == "--demo", !args.isEmpty {
               let id = args.removeFirst()

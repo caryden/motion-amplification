@@ -12,6 +12,8 @@ final class AppModel: ObservableObject {
   @Published var hi = 15.0
   @Published var alpha = 20.0
   @Published var smoothing = 2.0
+  /// If true, the analysis and the render cancel whole-frame camera motion.
+  @Published var removeCamera = true
   @Published var showOverlay = true
   @Published var overlayOpacity = 0.85
   @Published var heat: CGImage?
@@ -29,9 +31,13 @@ final class AppModel: ObservableObject {
   @Published var cellSpectrum: [Float]?
   @Published var cellLabel = ""
   @Published var captureFps = 0.0
+  /// The distinct tones of the audio spectrum, in ascending frequency order.
+  @Published var audioPeaks: [(hz: Double, amplitude: Float)] = []
+  /// The rotation frequency that the harmonic markers use, in Hz. 0 hides the markers.
+  @Published var fundamental = 0.0
   /// The distinct peaks of the motion spectrum, in ascending frequency order.
   @Published var peaks: [(hz: Double, amplitude: Float)] = []
-  /// Values of the `--fps`, `--lo`, and `--hi` launch arguments. A demo sets the same keys.
+  /// Values of the `--fps`, `--lo`, `--hi`, and `--rotation` launch arguments. A demo sets the same keys.
   var launchOptions: [String: Double] = [:]
   @Published var recents: [URL] = AppModel.loadRecents()
   /// True while a demo clip downloads.
@@ -83,6 +89,8 @@ final class AppModel: ObservableObject {
     isPlaying = false
     analysis = nil
     peaks = []
+    audioPeaks = []
+    fundamental = 0
     audioSpectrum = nil
     audio = nil
     heat = nil
@@ -92,6 +100,7 @@ final class AppModel: ObservableObject {
     showAmplified = false
     status = "Reading \(url.lastPathComponent)"
     progress = 0
+    let stabilize = removeCamera
     job = Task {
       do {
         let info = try await VideoInfo.load(url)
@@ -100,16 +109,22 @@ final class AppModel: ObservableObject {
         async let audioLoad = Task.detached { try await AudioData.load(url) }.value
         status = "Measuring motion"
         let result = try await Task.detached(priority: .userInitiated) { [weak self] in
-          try await analyzeMotion(url: url) { p in
+          try await analyzeMotion(url: url, removeCameraMotion: stabilize) { p in
             Task { @MainActor in self?.progress = p }
           }
         }.value
         if let a = try await audioLoad {
           audio = a
           audioSpectrum = await Task.detached { a.spectrum() }.value
+          if let sp = audioSpectrum {
+            audioPeaks = await Task.detached {
+              spectrumPeaks(sp.amplitude, binHz: sp.binHz, minHz: 20, maxHz: 10000, count: 8)
+                .sorted { $0.hz < $1.hz }
+            }.value
+          }
         }
         analysis = result
-        peaks = result.distinctPeaks(count: 6).sorted { $0.hz < $1.hz }
+        peaks = result.distinctPeaks(count: 9).sorted { $0.hz < $1.hz }
         captureFps = result.fps
         progress = nil
         if let top = result.distinctPeaks(count: 1).first ?? result.peaks(count: 1).first {
@@ -120,10 +135,17 @@ final class AppModel: ObservableObject {
         status = String(
           format: "%d frames at %.1f fps. Vibrations up to %.0f Hz are measurable.",
           result.frames, result.fps, result.nyquist)
+        if !result.cameraX.isEmpty {
+          let span = { (v: [Float]) in (v.max() ?? 0) - (v.min() ?? 0) }
+          status += String(
+            format: " Removed camera motion of up to %.1f px.",
+            max(span(result.cameraX), span(result.cameraY)))
+        }
         if let fps = launchOptions["--fps"] { setCaptureFps(fps) }
         if let lo = launchOptions["--lo"], let hi = launchOptions["--hi"] {
           setBand(lo: lo, hi: hi, final: true)
         }
+        if let r = launchOptions["--rotation"] { fundamental = r }
         launchOptions = [:]
         await debugSnapshot()
       } catch is CancellationError {
@@ -173,12 +195,56 @@ final class AppModel: ObservableObject {
     }
     let ratio = fps / a.fps
     analysis = a.rescaled(fps: fps)
-    peaks = analysis!.distinctPeaks(count: 6).sorted { $0.hz < $1.hz }
+    peaks = analysis!.distinctPeaks(count: 9).sorted { $0.hz < $1.hz }
     captureFps = fps
     cellSpectrum = nil
     cellLabel = ""
     setBand(lo: lo * ratio, hi: hi * ratio, final: true)
     status = String(format: "Capture rate set to %.1f fps. Vibrations up to %.0f Hz are measurable.", fps, fps / 2)
+  }
+
+  /// Turns camera motion removal on or off and measures the clip again.
+  func setRemoveCamera(_ on: Bool) {
+    removeCamera = on
+    guard let info, !busy else { return }
+    // Keep the current rate, band, and rotation across the new analysis.
+    launchOptions = ["--lo": lo, "--hi": hi]
+    if let a = analysis { launchOptions["--fps"] = a.fps }
+    if fundamental > 0 { launchOptions["--rotation"] = fundamental }
+    open(info.url, remember: false)
+  }
+
+  // MARK: Rotation
+
+  /// Sets the rotation frequency to the loudest audio bin within 3% of a frequency.
+  func setFundamental(near hz: Double) {
+    guard let sp = audioSpectrum, hz > 0 else { return }
+    let a = max(1, Int(hz * 0.97 / sp.binHz))
+    let b = min(sp.amplitude.count - 1, Int(hz * 1.03 / sp.binHz))
+    guard a <= b else { return }
+    let i = (a...b).max { sp.amplitude[$0] < sp.amplitude[$1] } ?? a
+    fundamental = Double(i) * sp.binHz
+  }
+
+  /// Sets the rotation frequency to the best-scoring harmonic series in the audio.
+  func estimateRotation() {
+    guard let sp = audioSpectrum else { return }
+    Task {
+      let result = await Task.detached { estimateFundamental(sp.amplitude, binHz: sp.binHz) }.value
+      if let result {
+        fundamental = result.hz
+        status = String(
+          format: "Estimated rotation: %.1f Hz, %.0f rpm. This is an estimate. Check it against the markers.",
+          result.hz, result.hz * 60)
+      }
+    }
+  }
+
+  /// Gets where a frequency appears in the video, after folding at the camera's limit.
+  func aliased(_ hz: Double) -> Double {
+    guard let fps = analysis?.fps, fps > 0 else { return hz }
+    let r = hz.truncatingRemainder(dividingBy: fps)
+    return r > fps / 2 ? fps - r : r
   }
 
   // MARK: Band
@@ -314,6 +380,7 @@ final class AppModel: ObservableObject {
     guard let info, let a = analysis, !busy else { return }
     let (lo, hi, alpha, sigma) = (self.lo, self.hi, self.alpha, self.smoothing)
     let maxDim = renderMaxDimension > 0 ? renderMaxDimension : nil
+    let path: (x: [Float], y: [Float])? = a.cameraX.isEmpty ? nil : (a.cameraX, a.cameraY)
     let output = workDir.appendingPathComponent("amplified-\(UUID().uuidString).mov")
     status = "Rendering amplified video"
     progress = 0
@@ -324,7 +391,7 @@ final class AppModel: ObservableObject {
           try await renderMagnified(
             url: info.url, output: output, lo: lo, hi: hi, alpha: alpha, sigma: sigma,
             fps: a.fps,
-            maxDimension: maxDim
+            maxDimension: maxDim, cameraPath: path
           ) { p in
             Task { @MainActor in self?.progress = p }
           }

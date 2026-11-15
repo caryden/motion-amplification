@@ -85,7 +85,8 @@ def main():
   manifest = {
       "h": H, "w": W, "scales": SCALES, "orients": ORIENTS, "fs": FS,
       "lo": LO, "hi": HI, "alpha": ALPHA, "frames": FRAMES, "sigma": SIGMA,
-      "biquad": list(sp.bandpass_biquad(LO, HI, FS)), "arrays": {},
+      "biquad": list(sp.bandpass_biquad(LO, HI, FS)),
+      "shift_hz": freq, "shift_px": amp, "arrays": {},
   }
 
   def save(name, array):

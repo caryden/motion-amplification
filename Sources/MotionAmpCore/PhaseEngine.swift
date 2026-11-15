@@ -81,6 +81,46 @@ final class GraphContext {
     return out
   }
 
+  /// Creates the cosine and sine of the Fourier phase ramp for a frame shift.
+  ///
+  /// Multiplying a spectrum by `exp(i * theta)`, where `theta` is
+  /// `2 * pi * (fx * dx + fy * dy)`, moves the image content by `(-dx, -dy)`
+  /// pixels. The shift is exact for any subpixel amount, and it wraps at the
+  /// frame edges.
+  ///
+  /// - Parameters:
+  ///   - dx: A one-element tensor that holds the x shift in pixels.
+  ///   - dy: A one-element tensor that holds the y shift in pixels.
+  func ramp(height: Int, width: Int, dx: T, dy: T) -> (cos: T, sin: T) {
+    var fx = [Float](repeating: 0, count: height * width)
+    var fy = fx
+    for r in 0..<height {
+      let vy = 2 * Double.pi * Double(r < height / 2 ? r : r - height) / Double(height)
+      for c in 0..<width {
+        let vx = 2 * Double.pi * Double(c < width / 2 ? c : c - width) / Double(width)
+        fx[r * width + c] = Float(vx)
+        fy[r * width + c] = Float(vy)
+      }
+    }
+    let theta = add(mul(const(fx, [height, width]), dx), mul(const(fy, [height, width]), dy))
+    return (g.cos(with: theta, name: nil), g.sin(with: theta, name: nil))
+  }
+
+  /// Multiplies a complex tensor by `exp(i * theta)`, or by its conjugate if `inverse` is true.
+  func rotate(_ re: T, _ im: T, by r: (cos: T, sin: T), inverse: Bool) -> (T, T) {
+    if inverse {
+      return (add(mul(re, r.cos), mul(im, r.sin)), sub(mul(im, r.cos), mul(re, r.sin)))
+    }
+    return (sub(mul(re, r.cos), mul(im, r.sin)), add(mul(re, r.sin), mul(im, r.cos)))
+  }
+
+  func one(_ v: Float) -> MPSGraphTensorData {
+    withUnsafeBytes(of: v) {
+      MPSGraphTensorData(
+        device: device, data: Data($0), shape: [1], dataType: .float32)
+    }
+  }
+
   func mul(_ a: T, _ b: T) -> T { g.multiplication(a, b, name: nil) }
   func add(_ a: T, _ b: T) -> T { g.addition(a, b, name: nil) }
   func sub(_ a: T, _ b: T) -> T { g.subtraction(a, b, name: nil) }
@@ -117,6 +157,8 @@ public final class Magnifier {
 
   private let ctx: GraphContext
   private let yIn: MPSGraphTensor
+  private let dxIn: MPSGraphTensor
+  private let dyIn: MPSGraphTensor
   private var refIn: [MPSGraphTensor] = []  // re then im, per level
   private var coefOut: [MPSGraphTensor] = []  // re then im, per level
   private var stateIn: [MPSGraphTensor] = []
@@ -186,7 +228,12 @@ public final class Magnifier {
 
     yIn = c.placeholder([height, width])
     let zero = c.g.constant(0, shape: GraphContext.ns([height, width]), dataType: .float32)
-    let (xRe, xIm) = c.fft(yIn, zero, axes: [0, 1], inverse: false)
+    dxIn = c.placeholder([1])
+    dyIn = c.placeholder([1])
+    let shift = c.ramp(height: height, width: width, dx: dxIn, dy: dyIn)
+    let (rawRe, rawIm) = c.fft(yIn, zero, axes: [0, 1], inverse: false)
+    // Cancel the camera shift before the pyramid measures anything.
+    let (xRe, xIm) = c.rotate(rawRe, rawIm, by: shift, inverse: false)
     let res = c.const(filters.residual, [height, width])
     var accRe = c.mul(xRe, res)
     var accIm = c.mul(xIm, res)
@@ -244,7 +291,9 @@ public final class Magnifier {
       accRe = c.add(accRe, c.uncrop(sRe, hc: hk, wc: wk, h: height, w: width))
       accIm = c.add(accIm, c.uncrop(sIm, hc: hk, wc: wk, h: height, w: width))
     }
-    yOut = c.fft(accRe, accIm, axes: [0, 1], inverse: true).0
+    // Put the camera shift back, so that the output frame lines up with the input frame.
+    let (outRe, outIm) = c.rotate(accRe, accIm, by: shift, inverse: true)
+    yOut = c.fft(outRe, outIm, axes: [0, 1], inverse: true).0
   }
 
   /// Gets the pyramid coefficients of a frame without changing the filter state.
@@ -254,7 +303,7 @@ public final class Magnifier {
   public func coefficients(_ y: [Float]) -> [(re: [Float], im: [Float])] {
     autoreleasepool {
       let yd = y.withUnsafeBufferPointer { ctx.data($0, [height, width]) }
-      let r = ctx.run([yIn: yd], coefOut)
+      let r = ctx.run([yIn: yd, dxIn: ctx.one(0), dyIn: ctx.one(0)], coefOut)
       return (0..<filters.scales).map { k in
         let n = filters.orients * filters.levelHeights[k] * filters.levelWidths[k]
         var re = [Float](repeating: 0, count: n)
@@ -272,15 +321,21 @@ public final class Magnifier {
   ///
   /// - Parameters:
   ///   - y: The luma frame in row-major order, `width * height` values.
+  ///   - shift: The camera displacement of this frame from the first frame, in
+  ///     pixels. The method cancels it before amplification and restores it
+  ///     in the output, so camera motion isn't amplified.
   ///   - out: The magnified luma frame. Must hold `width * height` values.
-  public func process(_ y: UnsafeBufferPointer<Float>, into out: inout [Float]) {
+  public func process(
+    _ y: UnsafeBufferPointer<Float>, shift: (x: Float, y: Float) = (0, 0), into out: inout [Float]
+  ) {
     autoreleasepool {
       let yd = ctx.data(y, [height, width])
+      let (sx, sy) = (ctx.one(shift.x), ctx.one(shift.y))
       if refData == nil {
-        let r = ctx.run([yIn: yd], coefOut)
+        let r = ctx.run([yIn: yd, dxIn: sx, dyIn: sy], coefOut)
         refData = coefOut.map { r[$0]! }
       }
-      var feeds: [MPSGraphTensor: MPSGraphTensorData] = [yIn: yd]
+      var feeds: [MPSGraphTensor: MPSGraphTensorData] = [yIn: yd, dxIn: sx, dyIn: sy]
       for (t, d) in zip(refIn, refData!) { feeds[t] = d }
       for (t, d) in zip(stateIn, stateData) { feeds[t] = d }
       let r = ctx.run(feeds, [yOut] + stateOut)
@@ -306,6 +361,8 @@ public final class MotionAnalyzer {
 
   private let ctx: GraphContext
   private let yIn: MPSGraphTensor
+  private let dxIn: MPSGraphTensor
+  private let dyIn: MPSGraphTensor
   private var refIn: [MPSGraphTensor] = []  // re then im, per level
   private var coefOut: [MPSGraphTensor] = []  // re then im, per level
   private let disp: MPSGraphTensor
@@ -335,7 +392,12 @@ public final class MotionAnalyzer {
     let c = ctx
     yIn = c.placeholder([height, width])
     let zero = c.g.constant(0, shape: GraphContext.ns([height, width]), dataType: .float32)
-    let (xRe, xIm) = c.fft(yIn, zero, axes: [0, 1], inverse: false)
+    dxIn = c.placeholder([1])
+    dyIn = c.placeholder([1])
+    let shift = c.ramp(height: height, width: width, dx: dxIn, dy: dyIn)
+    let (rawRe, rawIm) = c.fft(yIn, zero, axes: [0, 1], inverse: false)
+    // Cancel the camera shift before the pyramid measures anything.
+    let (xRe, xIm) = c.rotate(rawRe, rawIm, by: shift, inverse: false)
     var num: MPSGraphTensor?
     var den: MPSGraphTensor?
     for (k, block) in zip(levels, blocks) {
@@ -392,16 +454,20 @@ public final class MotionAnalyzer {
   ///   - displacement: The x grid then the y grid, in pixels of the input frame.
   ///     Must hold `2 * gridHeight * gridWidth` values.
   ///   - weight: The pooled squared coefficient amplitude, in the same layout.
+  ///   - shift: A camera displacement, in pixels, to cancel before measuring.
+  ///     The same frame can be measured again with a refined shift.
   public func process(
-    _ y: UnsafeBufferPointer<Float>, displacement: inout [Float], weight w: inout [Float]
+    _ y: UnsafeBufferPointer<Float>, shift: (x: Float, y: Float) = (0, 0),
+    displacement: inout [Float], weight w: inout [Float]
   ) {
     autoreleasepool {
       let yd = ctx.data(y, [height, width])
+      let (sx, sy) = (ctx.one(shift.x), ctx.one(shift.y))
       if refData == nil {
-        let r = ctx.run([yIn: yd], coefOut)
+        let r = ctx.run([yIn: yd, dxIn: sx, dyIn: sy], coefOut)
         refData = coefOut.map { r[$0]! }
       }
-      var feeds: [MPSGraphTensor: MPSGraphTensorData] = [yIn: yd]
+      var feeds: [MPSGraphTensor: MPSGraphTensorData] = [yIn: yd, dxIn: sx, dyIn: sy]
       for (t, d) in zip(refIn, refData!) { feeds[t] = d }
       let r = ctx.run(feeds, [disp, weight])
       ctx.read(r[disp]!, into: &displacement)

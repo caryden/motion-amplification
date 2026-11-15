@@ -7,6 +7,7 @@ final class ReferenceTests: XCTestCase {
   struct Manifest: Decodable {
     let h, w, scales, orients, frames: Int
     let fs, lo, hi, alpha, sigma: Double
+    let shift_hz, shift_px: Double
     let biquad: [Double]
   }
 
@@ -124,6 +125,48 @@ final class ReferenceTests: XCTestCase {
       }
     }
     XCTAssertLessThan(worst, 2e-3)
+  }
+
+  /// Checks that the frame shift cancels a known whole-frame motion.
+  ///
+  /// Every fixture frame is the first frame moved in x by a known subpixel
+  /// amount. With that amount as the shift, the measured displacement is 0.
+  func testShiftCancelsKnownMotion() throws {
+    let m = try manifest()
+    let video = try load("video")
+    let an = try MotionAnalyzer(
+      width: m.w, height: m.h, levels: [1, 2, 3], pool: 2, orients: m.orients)
+    let n = m.h * m.w
+    let cells = an.gridWidth * an.gridHeight
+    var d = [Float](repeating: 0, count: 2 * cells)
+    var w = d
+    var worst: Float = 0
+    for i in 0..<m.frames {
+      let dx = Float(m.shift_px * sin(2 * Double.pi * m.shift_hz * Double(i) / m.fs))
+      video.withUnsafeBufferPointer {
+        an.process(
+          UnsafeBufferPointer(rebasing: $0[i * n..<(i + 1) * n]), shift: (dx, 0),
+          displacement: &d, weight: &w)
+      }
+      let floor = w.max()! * 1e-3
+      for j in 0..<2 * cells where w[j] > floor { worst = max(worst, abs(d[j])) }
+    }
+    // The uncorrected motion is 0.05 px.
+    XCTAssertLessThan(worst, 1e-3)
+  }
+
+  /// Checks that a shift alone, with zero gain, returns the input frame.
+  func testShiftIsRestoredInOutput() throws {
+    let m = try manifest()
+    let image = try load("image")
+    let mag = try Magnifier(
+      width: m.w, height: m.h, fps: m.fs, lo: m.lo, hi: m.hi, alpha: 0, scales: m.scales,
+      orients: m.orients)
+    var out = [Float](repeating: 0, count: image.count)
+    for shift in [(Float(0), Float(0)), (Float(0.37), Float(-1.6))] {
+      image.withUnsafeBufferPointer { mag.process($0, shift: shift, into: &out) }
+      XCTAssertLessThan(maxError(out, image), 1e-3)
+    }
   }
 
   /// Checks that a zero gain returns the input at a size that isn't a power of two.

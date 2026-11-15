@@ -58,6 +58,12 @@ public struct MotionAnalysis: Sendable {
   public let globalSpectrum: [Float]
   /// The median amplitude over all bins of the confident cells, in source pixels.
   public let noiseFloor: Float
+  /// The camera's x displacement from the first frame, per frame, in source pixels.
+  ///
+  /// Empty if the analysis didn't remove camera motion.
+  public let cameraX: [Float]
+  /// The camera's y displacement from the first frame, per frame, in source pixels.
+  public let cameraY: [Float]
 
   public var nyquist: Double { fps / 2 }
 
@@ -69,7 +75,8 @@ public struct MotionAnalysis: Sendable {
     MotionAnalysis(
       gridWidth: gridWidth, gridHeight: gridHeight, frames: frames, fps: newFps,
       binHz: binHz * newFps / fps, bins: bins, amplitude: amplitude, confidence: confidence,
-      globalSpectrum: globalSpectrum, noiseFloor: noiseFloor)
+      globalSpectrum: globalSpectrum, noiseFloor: noiseFloor, cameraX: cameraX,
+      cameraY: cameraY)
   }
 
   func binRange(lo: Double, hi: Double) -> ClosedRange<Int> {
@@ -112,6 +119,20 @@ public struct MotionAnalysis: Sendable {
       }
     }
     return out
+  }
+
+  /// Gets the median, over confident cells, of each cell's largest amplitude in a band.
+  ///
+  /// This value describes how much a typical part of the frame moves in the
+  /// band. Camera motion raises it, because camera motion moves every cell.
+  public func typicalAmplitude(lo: Double, hi: Double) -> Float {
+    let r = binRange(lo: lo, hi: hi)
+    var peaks: [Float] = []
+    for c in 0..<gridWidth * gridHeight where confidence[c] > 0.5 {
+      peaks.append(amplitude[c * bins + r.lowerBound...c * bins + r.upperBound].max() ?? 0)
+    }
+    peaks.sort()
+    return peaks.isEmpty ? 0 : peaks[peaks.count / 2]
   }
 
   /// Gets the amplitude spectrum of one cell.
@@ -161,6 +182,100 @@ public struct MotionAnalysis: Sendable {
   }
 }
 
+/// Gets the median of the values whose weight is at least a quarter of the mean weight.
+///
+/// - Parameter scratch: Reused storage for the sort.
+func texturedMedian(
+  _ values: [Float], _ weights: [Float], _ range: Range<Int>, _ scratch: inout [Float]
+) -> Float {
+  var mean: Float = 0
+  for i in range { mean += weights[i] }
+  let floor = 0.25 * mean / Float(range.count)
+  scratch.removeAll(keepingCapacity: true)
+  for i in range where weights[i] >= floor { scratch.append(values[i]) }
+  guard !scratch.isEmpty else { return 0 }
+  scratch.sort()
+  return scratch[scratch.count / 2]
+}
+
+/// Fits a plane to one displacement component over the grid and subtracts it in place.
+///
+/// A camera that rolls or zooms moves each cell by an amount that varies
+/// linearly across the frame. The exact frequency-domain shift cancels only
+/// the part that all cells share, so this fit removes the linear remainder
+/// from the measurement. It fits textured cells only, and it fits twice: the
+/// second pass ignores cells that sit far from the first plane, so a part
+/// that moves on its own doesn't tilt the fit.
+func subtractPlane(
+  _ values: inout [Float], _ weights: [Float], offset: Int, gridWidth gw: Int, gridHeight gh: Int
+) {
+  let cells = gw * gh
+  var mean: Float = 0
+  for i in 0..<cells { mean += weights[offset + i] }
+  let floor = 0.25 * mean / Float(cells)
+  var limit = Float.greatestFiniteMagnitude
+  var plane: (Double, Double, Double) = (0, 0, 0)
+  var residuals: [Float] = []
+  for pass in 0..<2 {
+    // Normal equations for v = p0 + p1 * x + p2 * y, with x and y in [-0.5, 0.5].
+    var m = [Double](repeating: 0, count: 9)
+    var rhs = [Double](repeating: 0, count: 3)
+    var used = 0
+    for gy in 0..<gh {
+      let y = Double(gy) / Double(gh) - 0.5
+      for gx in 0..<gw {
+        let i = offset + gy * gw + gx
+        guard weights[i] >= floor else { continue }
+        let x = Double(gx) / Double(gw) - 0.5
+        let v = Double(values[i])
+        if pass == 1, abs(Float(v - (plane.0 + plane.1 * x + plane.2 * y))) > limit { continue }
+        let row = [1, x, y]
+        for a in 0..<3 {
+          rhs[a] += row[a] * v
+          for b in 0..<3 { m[a * 3 + b] += row[a] * row[b] }
+        }
+        used += 1
+      }
+    }
+    guard used >= 16 else { return }
+    let det =
+      m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
+      + m[2] * (m[3] * m[7] - m[4] * m[6])
+    guard abs(det) > 1e-12 else { return }
+    // Cramer's rule.
+    func solve(_ col: Int) -> Double {
+      var c = m
+      for r in 0..<3 { c[r * 3 + col] = rhs[r] }
+      return
+        (c[0] * (c[4] * c[8] - c[5] * c[7]) - c[1] * (c[3] * c[8] - c[5] * c[6])
+        + c[2] * (c[3] * c[7] - c[4] * c[6])) / det
+    }
+    plane = (solve(0), solve(1), solve(2))
+    if pass == 0 {
+      residuals.removeAll(keepingCapacity: true)
+      for gy in 0..<gh {
+        let y = Double(gy) / Double(gh) - 0.5
+        for gx in 0..<gw {
+          let i = offset + gy * gw + gx
+          guard weights[i] >= floor else { continue }
+          let x = Double(gx) / Double(gw) - 0.5
+          residuals.append(abs(values[i] - Float(plane.0 + plane.1 * x + plane.2 * y)))
+        }
+      }
+      residuals.sort()
+      // Three times the median absolute residual.
+      limit = 3 * residuals[residuals.count / 2] + 1e-6
+    }
+  }
+  for gy in 0..<gh {
+    let y = Double(gy) / Double(gh) - 0.5
+    for gx in 0..<gw {
+      let x = Double(gx) / Double(gw) - 0.5
+      values[offset + gy * gw + gx] -= Float(plane.0 + plane.1 * x + plane.2 * y)
+    }
+  }
+}
+
 /// Measures the vibration spectrum of every grid cell of a video.
 ///
 /// Decodes the whole file once. For each frame, measures displacement from
@@ -174,10 +289,17 @@ public struct MotionAnalysis: Sendable {
 ///   - targetGridWidth: The approximate number of grid cells along the frame width.
 ///   - confidenceFloor: The fraction of the 90th-percentile texture energy
 ///     under which a cell's confidence is 0.
+///   - removeCameraMotion: If true, estimates the whole-frame shift of each
+///     frame and cancels it before measuring. The shift is the median
+///     displacement over textured cells, so it follows whatever fills most of
+///     the frame. Motion that the whole scene shares is removed with it.
+///     The measurement also drops the part that varies linearly across the
+///     frame, which a rolling or zooming camera produces.
 ///   - progress: Called with a fraction from 0 to 1.
 public func analyzeMotion(
   url: URL, maxDimension: Int = 1280, levels: [Int] = [1, 2, 3], targetGridWidth: Int = 160,
-  confidenceFloor: Float = 0.01, progress: @Sendable (Double) -> Void = { _ in }
+  confidenceFloor: Float = 0.01, removeCameraMotion: Bool = true,
+  progress: @Sendable (Double) -> Void = { _ in }
 ) async throws -> MotionAnalysis {
   let info = try await VideoInfo.load(url)
   let reader = try await FrameReader(url: url, maxDimension: maxDimension)
@@ -193,6 +315,10 @@ public func analyzeMotion(
   var disp = [Float](repeating: 0, count: 2 * cells)
   var wt = disp
   var series: [[Float]] = []  // Per frame: x cells then y cells.
+  var camera: (x: Float, y: Float) = (0, 0)  // In pixels of the analysis frame.
+  var cameraX: [Float] = []
+  var cameraY: [Float] = []
+  var scratch: [Float] = []
   var energy = [Float](repeating: 0, count: cells)
   var firstTime = CMTime.invalid
   var lastTime = CMTime.invalid
@@ -206,8 +332,34 @@ public func analyzeMotion(
     if !firstTime.isValid { firstTime = t }
     lastTime = t
     readLuma(CMSampleBufferGetImageBuffer(sb)!, into: &y)
-    y.withUnsafeBufferPointer { analyzer.process($0, displacement: &disp, weight: &wt) }
+    // Measure, take the median displacement as the camera's residual shift,
+    // fold it into the running estimate, and measure again. The frequency-
+    // domain shift is exact, so each pass removes most of what remains even
+    // though the displacement scale is approximate. The estimate carries over
+    // to the next frame, which keeps the residual far from a phase wrap.
+    var residual: (x: Float, y: Float) = (0, 0)
+    for _ in 0..<(removeCameraMotion ? 3 : 1) {
+      y.withUnsafeBufferPointer {
+        analyzer.process($0, shift: camera, displacement: &disp, weight: &wt)
+      }
+      guard removeCameraMotion else { break }
+      residual = (
+        texturedMedian(disp, wt, 0..<cells, &scratch),
+        texturedMedian(disp, wt, cells..<2 * cells, &scratch)
+      )
+      camera.x += residual.x
+      camera.y += residual.y
+    }
+    if removeCameraMotion {
+      cameraX.append(camera.x * toSource)
+      cameraY.append(camera.y * toSource)
+    }
 
+    if removeCameraMotion {
+      // Remove what the last pass left, plus the roll and zoom remainder.
+      subtractPlane(&disp, wt, offset: 0, gridWidth: gw, gridHeight: gh)
+      subtractPlane(&disp, wt, offset: cells, gridWidth: gw, gridHeight: gh)
+    }
     var frame = [Float](repeating: 0, count: 2 * cells)
     for i in 0..<2 * cells {
       frame[i] = toSource * disp[i]
@@ -286,7 +438,8 @@ public func analyzeMotion(
   progress(1)
   return MotionAnalysis(
     gridWidth: gw, gridHeight: gh, frames: frames, fps: fps, binHz: fps / Double(nfft),
-    bins: bins, amplitude: amplitude, confidence: confidence, globalSpectrum: global, noiseFloor: noiseFloor)
+    bins: bins, amplitude: amplitude, confidence: confidence, globalSpectrum: global, noiseFloor: noiseFloor,
+    cameraX: cameraX, cameraY: cameraY)
 }
 
 /// Creates a color overlay image from a grid of values.
