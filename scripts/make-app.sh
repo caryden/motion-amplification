@@ -17,10 +17,12 @@ if [ ! -f "$DEMO" ]; then
   uv run -q --with numpy reference/make_test_video.py "$DEMO" \
     || echo "warning: the synthetic demo clip wasn't generated" >&2
 fi
+mkdir -p "$APP/Contents/Resources"
 if [ -f "$DEMO" ]; then
-  mkdir -p "$APP/Contents/Resources"
   cp "$DEMO" "$APP/Contents/Resources/"
 fi
+# Bundle the flywheel demo clip, which the repository stores.
+cp demo/flywheel-turret-240fps.mov "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

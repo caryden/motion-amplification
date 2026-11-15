@@ -5,6 +5,46 @@ which parts of the frame vibrate at a chosen frequency. It uses phase-based
 video magnification (Wadhwa et al., SIGGRAPH 2013) on the GPU through
 MPSGraph.
 
+![The Motion Amp window with the robot flywheel clip open. A heat map marks
+the turret plate, and the motion spectrum has a peak at 72.9 Hz inside the
+selected band.](docs/screenshot.png)
+
+The screenshot shows the bundled robot flywheel clip with the band from 70 Hz
+to 78 Hz selected. The heat map marks the turret plate, which vibrates at
+72.9 Hz. The audio plot shows a tone near 75 Hz in the same band.
+
+## Example: a robot flywheel
+
+The example is a handheld iPhone slow-motion clip of a FIRST Tech Challenge
+robot. Its flywheel shooter makes an audible vibration, and the goal is to find
+which parts move at which frequency.
+
+| Clip | Details |
+| --- | --- |
+| [Original](demo/flywheel-turret-240fps.mov) | 1080 by 1920 pixels, 239.9 frames per second, 1,418 frames, 38 MB |
+| [Amplified, 70 Hz to 78 Hz](demo/flywheel-turret-amplified-70-78hz.mov) | 720 by 1280 pixels, gain 20, smoothing 2, camera motion removed, 16 MB |
+
+GitHub doesn't play these files inside the README. To watch a clip, click its
+link, and then download the file or use the player on the file's page.
+
+Both files play in slow motion with the sound at its recorded pitch, because
+an iPhone slow-motion file stores 240 frames per second of video beside
+real-time audio. The original is the iPhone's file with the location and
+device tags removed. The video and audio data are unchanged.
+
+To reproduce the amplified clip, build the project and run the render command:
+
+```sh
+.build/release/motionamp-cli render demo/flywheel-turret-240fps.mov \
+  amplified.mov --lo 70 --hi 78 --max-dim 1280
+```
+
+The command writes video only. The amplified clip in this repository also
+carries the original's audio track, which `ffmpeg` copied in.
+
+In the app, select **File > Open Demo > Robot Flywheel, iPhone 240 fps** to
+open the original with the same band.
+
 ## Before you begin
 
 - macOS 14 or later with Xcode installed.
@@ -15,6 +55,30 @@ MPSGraph.
 
 A camera resolves vibrations only up to half its frame rate: 120 Hz for
 240 frames per second, 30 Hz for 60 frames per second.
+
+## Transfer iPhone slow-motion clips
+
+Transfer the unmodified original file, not a shared copy. AirDrop can send a
+rendered copy of a slow-motion clip in place of the original. In the case that
+prompted this note, a clip recorded at 240 frames per second arrived as an
+H.264 file at 30 frames per second. That file keeps every captured frame but
+plays each one for eight times as long, and its audio is slowed to match. Every
+frequency that the app reports from such a file is one eighth of the true
+value.
+
+To get the original onto a Mac, follow these steps:
+
+1. Let the clip sync to the Photos app on the Mac through iCloud Photos, or
+   import it over a cable.
+1. In Photos, select the clip.
+1. Select **File > Export > Export Unmodified Original**.
+
+To check a file, open it in the app. The **Clip** group shows a capture rate
+near 240 fps for an original and 30 fps for a rendered copy.
+
+If you have only the rendered copy, type the true rate in the **Capture rate**
+field. That step corrects the motion frequencies. It doesn't correct the audio,
+so the audio plot and the motion plot no longer line up.
 
 ## Build and run
 
@@ -36,6 +100,9 @@ Select **File > Open Demo**, and then select a clip:
 
 - **Two Vibrating Patches, with Audio** ships in the app. It holds a 23 Hz
   and a 41 Hz vibration, with matching audio tones.
+- **Robot Flywheel, iPhone 240 fps** ships in the app. It's the handheld
+  slow-motion clip from the example, and it opens with the band from 70 Hz to
+  78 Hz.
 - **Guitar Strings** and **Sleeping Baby** download from MIT CSAIL on first
   use, into the `~/Library/Caches/MotionAmp/demos` directory. They come from
   Wu et al., "Eulerian Video Magnification for Revealing Subtle Changes in the
@@ -65,6 +132,8 @@ Each demo opens with its capture rate and frequency band already set.
   rendering.
 - `Sources/MotionAmp/`: the SwiftUI app.
 - `Sources/motionamp-cli/`: a command-line front end for scripted checks.
+- `demo/`: the robot flywheel clip and its amplified result.
+- `docs/`: the screenshot in this file.
 
 ## Test
 

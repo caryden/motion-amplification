@@ -14,14 +14,21 @@ struct Demo: Identifiable {
   let lo: Double
   let hi: Double
 
-  /// The clips from Wu et al., "Eulerian Video Magnification for Revealing
-  /// Subtle Changes in the World" (SIGGRAPH 2012). Their page states no
-  /// redistribution terms, so the app downloads them from the authors' server
-  /// on request and doesn't ship them.
+  /// The synthetic clip and the flywheel clip ship in the app bundle.
+  ///
+  /// The guitar and baby clips come from Wu et al., "Eulerian Video
+  /// Magnification for Revealing Subtle Changes in the World" (SIGGRAPH 2012).
+  /// Their page states no redistribution terms, so the app downloads them from
+  /// the authors' server on request and doesn't ship them.
   static let all: [Demo] = [
     Demo(
       id: "synthetic", title: "Two Vibrating Patches, with Audio", file: "synthetic-demo.mp4",
       remote: nil, fps: nil, lo: 21.6, hi: 24.4),
+    // An iPhone slow-motion clip of a robot's flywheel shooter, filmed
+    // handheld. The 70 Hz to 78 Hz band holds the turret plate's vibration.
+    Demo(
+      id: "flywheel", title: "Robot Flywheel, iPhone 240 fps", file: "flywheel-turret-240fps.mov",
+      remote: nil, fps: nil, lo: 70, hi: 78),
     Demo(
       id: "guitar", title: "Guitar Strings (downloads 1.2 MB)", file: "guitar.mp4",
       remote: URL(string: "https://people.csail.mit.edu/mrub/evm/video/guitar.mp4"),
@@ -68,10 +75,10 @@ extension AppModel {
     let name = (file as NSString).deletingPathExtension
     let ext = (file as NSString).pathExtension
     if let url = Bundle.main.url(forResource: name, withExtension: ext) { return url }
-    // A binary that runs outside the app bundle reads the build folder.
-    let local = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-      .appendingPathComponent("build/demo/\(file)")
-    return FileManager.default.fileExists(atPath: local.path) ? local : nil
+    // A binary that runs outside the app bundle reads the repository folders.
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    return ["build/demo", "demo"].map { root.appendingPathComponent("\($0)/\(file)") }
+      .first { FileManager.default.fileExists(atPath: $0.path) }
   }
 
   /// Opens a demo clip with its capture rate and band, downloading it first if needed.
