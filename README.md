@@ -79,3 +79,11 @@ Regenerate the fixtures after a change to `reference/steerable.py`:
 ```sh
 uv run --with numpy reference/make_fixtures.py
 ```
+
+## License
+
+The code in this repository is available under the MIT License. For the terms,
+see the `LICENSE` file.
+
+The license doesn't cover the demo clips that the app downloads from MIT. Those
+clips belong to their authors and aren't part of this repository.
