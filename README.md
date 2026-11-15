@@ -80,6 +80,47 @@ Regenerate the fixtures after a change to `reference/steerable.py`:
 uv run --with numpy reference/make_fixtures.py
 ```
 
+## Acknowledgments
+
+This project started from Steve Mould's video
+[Reveal Invisible Motion With This Clever Video Trick](https://www.youtube.com/watch?v=rEoc0YoALt0),
+which shows what motion amplification can reveal in ordinary footage.
+
+The method comes from research at the MIT Computer Science and Artificial
+Intelligence Laboratory (CSAIL):
+
+- [Phase-Based Video Motion Processing](https://people.csail.mit.edu/nwadhwa/phase-video/)
+  by Neal Wadhwa, Michael Rubinstein, Frédo Durand, and William T. Freeman,
+  SIGGRAPH 2013. The engine in this repository implements the complex steerable
+  pyramid and the phase amplification that this paper describes.
+- [Eulerian Video Magnification for Revealing Subtle Changes in the World](https://people.csail.mit.edu/mrub/evm/)
+  by Hao-Yu Wu, Michael Rubinstein, Eugene Shih, John Guttag, Frédo Durand, and
+  William T. Freeman, SIGGRAPH 2012. The guitar and baby demo clips come from
+  this project page, and the demo bands follow the bands that the authors
+  published.
+- [Video Magnification](https://people.csail.mit.edu/mrub/vidmag/), the
+  overview page that links both papers and later work.
+
+The temporal band-pass filter uses the constant-peak-gain form from the
+[Audio EQ Cookbook](https://www.w3.org/TR/audio-eq-cookbook/) by Robert
+Bristow-Johnson.
+
+The following open-source projects informed the design. This repository
+contains no code from them:
+
+- [pyevm](https://github.com/roaldarbol/pyevm): phase-based magnification in
+  PyTorch.
+- [Live Video Magnification](https://github.com/tschnz/Live-Video-Magnification):
+  a desktop app that uses a Riesz pyramid.
+- [Angstrom](https://github.com/levi2234/Angstrom): phase-based magnification
+  with a frequency range option.
+- [MotionAplification](https://github.com/IvRogoz/MotionAplification): Eulerian
+  and phase-based variants.
+- [visual-mic](https://github.com/dsforza96/visual-mic): an implementation of
+  the Visual Microphone, which recovers sound from video. The Veritasium video
+  [Can You Recover Sound From Images?](https://www.youtube.com/watch?v=eUzB0L0mSCI)
+  explains that technique.
+
 ## License
 
 The code in this repository is available under the MIT License. For the terms,
