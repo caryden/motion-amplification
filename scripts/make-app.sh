@@ -7,6 +7,20 @@ APP=build/MotionAmp.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp .build/release/MotionAmp "$APP/Contents/MacOS/MotionAmp"
+
+# Bundle the synthetic demo clip. Generating it requires uv and ffmpeg. If
+# either is missing, the app still builds, and the demo menu item reports
+# that the clip isn't included.
+DEMO=build/demo/synthetic-demo.mp4
+if [ ! -f "$DEMO" ]; then
+  mkdir -p build/demo
+  uv run -q --with numpy reference/make_test_video.py "$DEMO" \
+    || echo "warning: the synthetic demo clip wasn't generated" >&2
+fi
+if [ -f "$DEMO" ]; then
+  mkdir -p "$APP/Contents/Resources"
+  cp "$DEMO" "$APP/Contents/Resources/"
+fi
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -31,8 +31,11 @@ final class AppModel: ObservableObject {
   @Published var captureFps = 0.0
   /// The distinct peaks of the motion spectrum, in ascending frequency order.
   @Published var peaks: [(hz: Double, amplitude: Float)] = []
-  /// Values of the `--fps`, `--lo`, and `--hi` launch arguments.
+  /// Values of the `--fps`, `--lo`, and `--hi` launch arguments. A demo sets the same keys.
   var launchOptions: [String: Double] = [:]
+  @Published var recents: [URL] = AppModel.loadRecents()
+  /// True while a demo clip downloads.
+  var demoLoading = false
 
   let player = AVPlayer()
   private var audio: AudioData?
@@ -70,7 +73,11 @@ final class AppModel: ObservableObject {
     if panel.runModal() == .OK, let url = panel.url { open(url) }
   }
 
-  func open(_ url: URL) {
+  /// Opens a clip and measures its motion.
+  ///
+  /// - Parameter remember: If true, adds the clip to the Open Recent menu.
+  func open(_ url: URL, remember: Bool = true) {
+    if remember { self.remember(url) }
     job?.cancel()
     player.pause()
     isPlaying = false

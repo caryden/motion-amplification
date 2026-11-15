@@ -9,6 +9,9 @@ MPSGraph.
 
 - macOS 14 or later with Xcode installed.
 - A video shot on a tripod. The method amplifies camera shake too.
+- Optional: the `uv` and `ffmpeg` commands. The build script uses them to
+  generate the bundled demo clip. Without them, the app builds and that one
+  demo is unavailable.
 
 A camera resolves vibrations only up to half its frame rate: 120 Hz for
 240 frames per second, 30 Hz for 60 frames per second.
@@ -27,9 +30,24 @@ Open the app:
 open build/MotionAmp.app
 ```
 
+## See the demos
+
+Select **File > Open Demo**, and then select a clip:
+
+- **Two Vibrating Patches, with Audio** ships in the app. It holds a 23 Hz
+  and a 41 Hz vibration, with matching audio tones.
+- **Guitar Strings** and **Sleeping Baby** download from MIT CSAIL on first
+  use, into the `~/Library/Caches/MotionAmp/demos` directory. They come from
+  Wu et al., "Eulerian Video Magnification for Revealing Subtle Changes in the
+  World" (SIGGRAPH 2012). The app doesn't redistribute them, because their
+  page states no redistribution terms.
+
+Each demo opens with its capture rate and frequency band already set.
+
 ## Use the app
 
-1. Click **Open Video…**. The app measures motion over the whole clip.
+1. Click **Open Video…**, or select a clip from **File > Open Recent**. The
+   app measures motion over the whole clip.
 1. In the spectrum plot, drag across a frequency range, or click a peak
    button. The heat map shows where the frame moves in that band, and the
    audio plays filtered to the same band.
